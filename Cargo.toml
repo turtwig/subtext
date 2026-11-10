@@ -1,0 +1,36 @@
+[package]
+name = "subtext"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "7.0.0"
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "highlighter", "thread-pool", "wayland", "advanced"] }
+iced_core = "0.14"
+iced_graphics = "0.14.0"
+iced_tiny_skia = { version = "0.14.1", default-features = false }
+iced_layershell = "0.19"
+layershellev = "0.19.1"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+uuid = { version = "1.29.0", features = ["v4"] }
+wayland-client = "0.31.15"
+wayland-protocols-plasma = "0.3.12"
+# iced_exdevtools 0.19.1 matches winit-core 0.31.0-beta.2. A newer beta adds
+# a keycode variant and that match no longer compiles.
+winit-core = "=0.31.0-beta.2"
+
+[patch.crates-io]
+# Local hook so a layer surface can receive its blur region before it maps.
+layershellev = { path = "vendor/layershellev" }
+# Argb8888 so a resize grab can cover the output without painting it.
+softbuffer = { path = "vendor/softbuffer" }
+# Clip editor glyphs, and damage the editor when its text changes.
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+# Monospace advances snap to the hinted pixel cell.
+cosmic-text = { path = "vendor/cosmic-text" }
+
+[dev-dependencies]
+cosmic-text = "0.15"
+tempfile = "3.27.0"
