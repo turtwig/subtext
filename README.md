@@ -72,3 +72,7 @@ cp target/release/subtext ~/.local/bin/subtext
 `~/.local/bin` has to be on `PATH`. Start it from a terminal inside the Wayland session. If a drawer is already resident, `pkill subtext` before starting the new one.
 
 On x86_64, the link wraps `acosf` and `atan2f` so the binary uses the glibc 2.2.5 versions of those two symbols. A host with glibc 2.41 can run that release.
+
+## License
+
+MIT. Use it for whatever you like. The notice is in `LICENSE`.
