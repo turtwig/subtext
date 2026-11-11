@@ -11,9 +11,15 @@ use crate::editor::Tab;
 use crate::editor::wrap::Slot;
 use crate::geom::{self, Edge};
 use crate::message::Message;
+use iced::advanced::layout::{self, Layout, Node};
+use iced::advanced::mouse;
+use iced::advanced::renderer;
+use iced::advanced::widget::{Tree, Widget};
 use iced::highlighter;
 use iced::widget::{button, column, container, row, space, stack, text, text_editor, text_input};
-use iced::{Color, Element, Font, Length, Pixels, Theme, alignment};
+use iced::{
+    Color, Element, Font, Length, Padding, Pixels, Point, Rectangle, Size, Theme, alignment,
+};
 
 /// Stable id so show/tab-switch can focus the editor without a click.
 pub const EDITOR_ID: iced::widget::Id = iced::widget::Id::new("editor");
@@ -333,23 +339,17 @@ fn line_highlight(
     lead: f32,
     editor_pad: u32,
 ) -> Element<'static, Message> {
-    let (pad, heights) = row_boxes(slots.len(), row_height, lead, editor_pad);
-    let mut rows = Vec::with_capacity(slots.len() + 1);
-    rows.push(space().height(Length::Fixed(pad)).into());
-    for (slot, height) in slots.iter().zip(heights) {
-        rows.push(
+    let rows = slots
+        .iter()
+        .map(|slot| {
             container(space())
                 .width(Length::Fill)
-                .height(Length::Fixed(height))
+                .height(Length::Fill)
                 .style(if slot.current { caret_row } else { clear_row })
-                .into(),
-        );
-    }
-    container(column(rows).spacing(0).width(Length::Fill))
-        .clip(true)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+                .into()
+        })
+        .collect();
+    in_text_box(editor_pad, 0.0, line_rows(lead, row_height, true, rows))
 }
 
 fn caret_row(theme: &Theme) -> container::Style {
@@ -373,11 +373,10 @@ fn gutter(
     editor_pad: u32,
     width: u32,
 ) -> Element<'static, Message> {
-    let (pad, heights) = row_boxes(slots.len(), cell.height as f32, lead, editor_pad);
+    let row_height = cell.height as f32;
     let numbers: Vec<Element<'static, Message>> = slots
         .iter()
-        .zip(heights)
-        .map(|(slot, height)| {
+        .map(|slot| {
             let label = slot
                 .number
                 .map(|number| number.to_string())
@@ -387,10 +386,11 @@ fn gutter(
                 text(label)
                     .size(gutter_text_size(text_size))
                     .font(Font::MONOSPACE)
-                    .line_height(iced_core::text::LineHeight::Absolute(Pixels(height)))
+                    .line_height(iced_core::text::LineHeight::Absolute(Pixels(row_height)))
                     .align_x(alignment::Horizontal::Right)
                     .align_y(alignment::Vertical::Center)
                     .width(Length::Fill)
+                    .height(Length::Fill)
                     .style(move |theme: &iced::Theme| iced::widget::text::Style {
                         color: Some(theme.palette().text.scale_alpha(if current {
                             0.9
@@ -399,46 +399,215 @@ fn gutter(
                         })),
                     }),
             )
-            .height(Length::Fixed(height))
+            .height(Length::Fill)
             .width(Length::Fill)
             .into()
         })
         .collect();
-    container(column(numbers).spacing(0))
-        .width(Length::Fixed(width as f32))
+    container(in_text_box(
+        editor_pad,
+        (editor_pad / 2) as f32,
+        line_rows(lead, row_height, false, numbers),
+    ))
+    .width(Length::Fixed(width as f32))
+    .height(Length::Fill)
+    .into()
+}
+
+/// Inset by the editor padding so a partial row clips on the same edge as the glyphs.
+fn in_text_box<'a>(
+    editor_pad: u32,
+    side: f32,
+    body: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    container(body)
+        .width(Length::Fill)
         .height(Length::Fill)
-        .clip(true)
-        .padding(iced::Padding {
-            top: pad,
-            right: (editor_pad / 2) as f32,
-            bottom: 0.0,
-            left: (editor_pad / 2) as f32,
+        .padding(Padding {
+            top: editor_pad as f32,
+            right: side,
+            bottom: editor_pad as f32,
+            left: side,
         })
         .into()
 }
 
-/// Top inset and per-row heights for the gutter and the caret band.
+/// The part of a line that sits inside the text box.
 ///
-/// The editor scrolls by pixels and clips to the text box. A row that starts
-/// above that box is shorter by the hidden pixels, so the number stays on the
-/// glyphs instead of sliding into the padding.
-fn row_boxes(count: usize, row_height: f32, lead: f32, editor_pad: u32) -> (f32, Vec<f32>) {
-    let lead = if lead.is_finite() { lead } else { 0.0 };
-    let hidden = if lead < 0.0 { -lead } else { 0.0 };
-    let pad = editor_pad as f32 + lead.max(0.0);
-    let heights = (0..count)
-        .map(|index| {
-            if index == 0 {
-                (row_height - hidden).max(1.0)
+/// `origin` is the line's top relative to that box. It is negative when the
+/// line starts above the box.
+fn visible_line(origin: f32, row_height: f32, box_height: f32) -> Option<(f32, f32)> {
+    if !origin.is_finite() || !row_height.is_finite() || !box_height.is_finite() {
+        return None;
+    }
+    if row_height <= 0.0 || box_height <= 0.0 {
+        return None;
+    }
+    let top = origin.max(0.0);
+    let bottom = (origin + row_height).min(box_height);
+    let height = bottom - top;
+    (height > 0.0).then_some((top, height))
+}
+
+/// Lays each row on the editor's line grid and clips it to the text box.
+///
+/// A band row is only the visible slice, so its background cannot spill into
+/// the padding. A number stays centered in the full line; the text box cuts
+/// the same pixels the glyphs lose.
+struct LineRows<'a, Message, Theme, Renderer> {
+    lead: f32,
+    row_height: f32,
+    band: bool,
+    rows: Vec<Element<'a, Message, Theme, Renderer>>,
+}
+
+fn line_rows<'a, Message, Theme, Renderer>(
+    lead: f32,
+    row_height: f32,
+    band: bool,
+    rows: Vec<Element<'a, Message, Theme, Renderer>>,
+) -> LineRows<'a, Message, Theme, Renderer> {
+    LineRows {
+        lead,
+        row_height,
+        band,
+        rows,
+    }
+}
+
+impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for LineRows<'a, Message, Theme, Renderer>
+where
+    Renderer: iced::advanced::Renderer,
+{
+    fn size(&self) -> Size<Length> {
+        Size {
+            width: Length::Fill,
+            height: Length::Fill,
+        }
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.rows.iter().map(Tree::new).collect()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(&self.rows);
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> Node {
+        if tree.children.len() != self.rows.len() {
+            tree.diff_children(&self.rows);
+        }
+        let box_size = finite_box(limits.max());
+        let lead = if self.lead.is_finite() {
+            self.lead
+        } else {
+            0.0
+        };
+        let mut children = Vec::with_capacity(self.rows.len());
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            let origin = lead + index as f32 * self.row_height;
+            let (y, height) = if self.band {
+                visible_line(origin, self.row_height, box_size.height).unwrap_or((0.0, 0.0))
             } else {
-                row_height
+                (origin, self.row_height.max(0.0))
+            };
+            let child_limits = layout::Limits::new(
+                Size::new(box_size.width, height),
+                Size::new(box_size.width, height),
+            );
+            let node = row
+                .as_widget_mut()
+                .layout(&mut tree.children[index], renderer, &child_limits)
+                .move_to(Point::new(0.0, y));
+            children.push(node);
+        }
+        Node::with_children(box_size, children)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let Some(clip) = layout.bounds().intersection(viewport) else {
+            return;
+        };
+        for (index, row) in self.rows.iter().enumerate() {
+            let Some(child) = layout.children().nth(index) else {
+                break;
+            };
+            if child.bounds().intersection(&clip).is_none() {
+                continue;
             }
-        })
-        .collect();
-    (pad, heights)
+            row.as_widget().draw(
+                &tree.children[index],
+                renderer,
+                theme,
+                style,
+                child,
+                cursor,
+                &clip,
+            );
+        }
+    }
+}
+
+impl<'a, Message, Theme, Renderer> From<LineRows<'a, Message, Theme, Renderer>>
+    for Element<'a, Message, Theme, Renderer>
+where
+    Message: 'a,
+    Theme: 'a,
+    Renderer: iced::advanced::Renderer + 'a,
+{
+    fn from(rows: LineRows<'a, Message, Theme, Renderer>) -> Self {
+        Element::new(rows)
+    }
+}
+
+fn finite_box(size: Size) -> Size {
+    Size::new(
+        if size.width.is_finite() {
+            size.width.max(0.0)
+        } else {
+            0.0
+        },
+        if size.height.is_finite() {
+            size.height.max(0.0)
+        } else {
+            0.0
+        },
+    )
 }
 
 /// Line numbers are smaller and dimmer than the buffer text.
 fn gutter_text_size(text_size: f32) -> f32 {
     (text_size * 0.7).clamp(10.0, 16.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visible_line;
+
+    #[test]
+    fn a_partial_top_line_keeps_the_visible_slice() {
+        assert_eq!(visible_line(-8.0, 29.0, 100.0), Some((0.0, 21.0)));
+    }
+
+    #[test]
+    fn a_partial_bottom_line_stops_at_the_text_box() {
+        assert_eq!(visible_line(90.0, 29.0, 100.0), Some((90.0, 10.0)));
+    }
+
+    #[test]
+    fn a_line_outside_the_text_box_is_not_drawn() {
+        assert_eq!(visible_line(-40.0, 29.0, 100.0), None);
+        assert_eq!(visible_line(100.0, 29.0, 100.0), None);
+    }
 }
