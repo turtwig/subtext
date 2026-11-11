@@ -71,6 +71,8 @@ pub enum Message {
     SetEdge(Edge),
     ToggleLineNumbers,
     ToggleWrap,
+    /// Tight padding and gutter around the glyphs.
+    ToggleCompact,
     TabStop(TabStop),
     /// Enter repeats the current line's indent when this is on.
     ToggleRememberIndent,

@@ -85,6 +85,8 @@ pub struct App {
     theme: ThemeChoice,
     line_numbers: bool,
     word_wrap: bool,
+    /// Tight padding and gutter around the glyphs.
+    compact: bool,
     tab_stop: TabStop,
     remember_indent: bool,
     hinting: bool,
@@ -202,6 +204,12 @@ impl App {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.show_caret(columns, wrap, rows);
                 }
+                self.persist();
+                Task::none()
+            }
+            Message::ToggleCompact => {
+                self.compact = !self.compact;
+                self.reclamp();
                 self.persist();
                 Task::none()
             }
@@ -388,6 +396,7 @@ impl App {
                 text_size: self.text_size,
                 text_unit: self.text_unit,
                 word_wrap: self.word_wrap,
+                compact: self.compact,
                 tab_stop: self.tab_stop,
                 remember_indent: self.remember_indent,
                 hinting: self.hinting,
@@ -414,6 +423,8 @@ impl App {
             columns: self.columns,
             rows: self.rows_on_screen(),
             height: self.height,
+            pad: geom::editor_pad(self.compact),
+            gutter: self.gutter(),
             text_size: self.text_pixels(),
             font: self.font.font(),
             syntax: self.theme.syntax(),
@@ -477,7 +488,7 @@ impl App {
 
     fn fresh(paths: Paths) -> Self {
         let mut app = Self::blank(paths);
-        app.rows = default_rows(app.edge, FALLBACK_OUTPUT.1, app.cell());
+        app.rows = default_rows(app.edge, FALLBACK_OUTPUT.1, app.cell(), geom::editor_pad(false));
         app.ensure_pixels();
         app.tabs.push(Tab::new_scratch(&app.paths.scratch, 1));
         app
@@ -514,6 +525,7 @@ impl App {
             theme: ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,
+            compact: false,
             tab_stop: TabStop::Spaces4,
             remember_indent: false,
             hinting: true,
@@ -547,6 +559,7 @@ impl App {
         app.theme = snapshot.theme;
         app.line_numbers = snapshot.line_numbers;
         app.word_wrap = snapshot.word_wrap;
+        app.compact = snapshot.compact;
         app.hinting = snapshot.hinting;
         app.click_away = snapshot.click_away;
         app.width = snapshot.width;
@@ -717,7 +730,7 @@ impl App {
         }
         let inner = self
             .height
-            .saturating_sub(geom::vertical_chrome(self.edge) + geom::FIND_BAR);
+            .saturating_sub(geom::vertical_chrome(self.edge, geom::editor_pad(self.compact)) + geom::FIND_BAR);
         (inner / self.cell().height.max(1)).max(1)
     }
 
@@ -1478,11 +1491,16 @@ impl App {
     }
 
     fn gutter(&self) -> u32 {
-        if self.line_numbers {
-            geom::gutter_width(self.cell())
-        } else {
-            0
+        if !self.line_numbers {
+            return 0;
         }
+        let digits = if self.compact {
+            let lines = self.tabs.get(self.active).map_or(1, |tab| tab.line_count());
+            (lines.to_string().len() as u32).max(2)
+        } else {
+            4
+        };
+        geom::gutter_width(self.cell(), digits, geom::editor_pad(self.compact))
     }
 
     fn ensure_pixels(&mut self) {
@@ -1493,6 +1511,7 @@ impl App {
                 self.rows,
                 self.cell(),
                 self.gutter(),
+                geom::editor_pad(self.compact),
             );
             if self.width == 0 {
                 self.width = width;
@@ -1516,10 +1535,11 @@ impl App {
 
     fn sync_cells(&mut self) {
         let cell = self.cell();
+        let pad = geom::editor_pad(self.compact);
         let inner_w = self
             .width
-            .saturating_sub(geom::horizontal_chrome(self.edge) + self.gutter());
-        let inner_h = self.height.saturating_sub(geom::vertical_chrome(self.edge));
+            .saturating_sub(geom::horizontal_chrome(self.edge, pad) + self.gutter());
+        let inner_h = self.height.saturating_sub(geom::vertical_chrome(self.edge, pad));
         self.columns = (inner_w / cell.width.max(1)).max(1);
         self.rows = (inner_h / cell.height.max(1)).max(1);
     }
@@ -1544,6 +1564,7 @@ impl App {
             geom::MIN_ROWS,
             self.cell(),
             self.gutter(),
+            geom::editor_pad(self.compact),
         )
     }
 
@@ -1554,6 +1575,7 @@ impl App {
             self.rows,
             self.cell(),
             self.gutter(),
+            geom::editor_pad(self.compact),
         )
         .0;
         let restore = if self.width_restore < self.min_pixels().0 {
@@ -1632,6 +1654,7 @@ impl App {
                     self.rows.max(geom::MIN_ROWS),
                     self.cell(),
                     self.gutter(),
+                    geom::editor_pad(self.compact),
                 );
                 self.width = width;
                 self.height = height;
@@ -1648,7 +1671,8 @@ impl App {
                 self.span_width = self.across_span;
             }
         } else if self.side_width == 0 || self.side_height == 0 {
-            let (width, height) = pixel_size(Edge::Left, 64, 28, self.cell(), self.gutter());
+            let (width, height) =
+                pixel_size(Edge::Left, 64, 28, self.cell(), self.gutter(), geom::editor_pad(self.compact));
             self.width = width;
             self.height = height;
             self.width_restore = width;
@@ -1719,6 +1743,7 @@ impl App {
             theme: self.theme,
             line_numbers: self.line_numbers,
             word_wrap: self.word_wrap,
+            compact: self.compact,
             tab_stop: self.tab_stop,
             width: self.width,
             height: self.height,
@@ -2022,6 +2047,7 @@ mod tests {
             theme: crate::look::ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,
+            compact: false,
             width: 800,
             height: 400,
             width_restore: 640,

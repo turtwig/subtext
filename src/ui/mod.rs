@@ -29,6 +29,10 @@ pub struct Drawer<'a> {
     pub columns: u32,
     pub rows: u32,
     pub height: u32,
+    /// Padding around the glyphs, from the saved layout choice.
+    pub pad: u32,
+    /// Pre-computed gutter width (0 when line numbers are off).
+    pub gutter: u32,
     pub text_size: f32,
     pub font: Font,
     pub syntax: highlighter::Theme,
@@ -62,7 +66,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
     // the editor itself stays clear and the caret row can show through.
     // One band sits behind the gutter and the text, so the padding between
     // them does not split the highlight.
-    let highlight: Element<'a, Message> = line_highlight(&view.slots, cell.height);
+    let highlight: Element<'a, Message> = line_highlight(&view.slots, cell.height, drawer.pad);
     let field: Element<'a, Message> = text_editor(&tab.content)
         .id(EDITOR_ID.clone())
         .font(drawer.font)
@@ -70,7 +74,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .line_height(iced_core::text::LineHeight::Absolute(Pixels(
             cell.height as f32,
         )))
-        .padding(geom::EDITOR_PAD as f32)
+        .padding(drawer.pad as f32)
         .wrapping(wrapping)
         .height(Length::Fill)
         .style(editor_style)
@@ -85,7 +89,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .into();
     let mut band_parts: Vec<Element<'a, Message>> = Vec::with_capacity(2);
     if drawer.line_numbers {
-        band_parts.push(gutter(&view.slots, drawer.text_size, cell));
+        band_parts.push(gutter(&view.slots, drawer.text_size, cell, drawer.pad, drawer.gutter));
     }
     band_parts.push(editor);
     let band: Element<'a, Message> = row(band_parts).height(Length::Fill).into();
@@ -320,11 +324,11 @@ fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Styl
     style
 }
 
-fn line_highlight(slots: &[Slot], row_height: u32) -> Element<'static, Message> {
+fn line_highlight(slots: &[Slot], row_height: u32, pad: u32) -> Element<'static, Message> {
     let mut rows = Vec::with_capacity(slots.len() + 1);
     rows.push(
         space()
-            .height(Length::Fixed(geom::EDITOR_PAD as f32))
+            .height(Length::Fixed(pad as f32))
             .into(),
     );
     for slot in slots {
@@ -352,7 +356,7 @@ fn clear_row(_theme: &Theme) -> container::Style {
     container::Style::default()
 }
 
-fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, Message> {
+fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell, pad: u32, width: u32) -> Element<'static, Message> {
     let numbers: Vec<Element<'static, Message>> = slots
         .iter()
         .map(|slot| {
@@ -385,17 +389,17 @@ fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, 
         })
         .collect();
     container(column(numbers).spacing(0))
-        .width(Length::Fixed(geom::gutter_width(cell) as f32))
+        .width(Length::Fixed(width as f32))
         .height(Length::Fill)
         .clip(true)
         .padding(iced::Padding {
-            top: geom::EDITOR_PAD as f32,
-            right: 8.0,
+            top: pad as f32,
+            right: (pad / 2) as f32,
             bottom: 0.0,
-            left: 8.0,
+            left: (pad / 2) as f32,
         })
         .into()
-}
+    }
 
 /// Line numbers are smaller and dimmer than the buffer text.
 fn gutter_text_size(text_size: f32) -> f32 {

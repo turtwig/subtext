@@ -419,6 +419,11 @@ impl Tab {
         self.content.perform(Action::Scroll { lines: delta });
     }
 
+    /// Number of lines in the buffer. 1 for an empty buffer.
+    pub fn line_count(&self) -> u32 {
+        self.text().lines().count().max(1) as u32
+    }
+
     pub fn text(&self) -> String {
         self.content.text()
     }
