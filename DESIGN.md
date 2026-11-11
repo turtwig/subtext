@@ -58,9 +58,11 @@ The plate follows the pointer while a grip is held, including after the cursor l
 
 The tab row sits on the screen-edge side: below the editor for a bottom drawer, above it for the others. Find sits between the editor and the tab row. The row is a few pixels tall and scrolls horizontally. The vertical wheel scrolls it sideways. Each tab has its own close button. There is no overflow chevron.
 
+Compact is off by default. On, the editor padding drops from 16px to 8px and the line-number gutter shrinks to the digits the active tab needs, with a floor of two. The window size stays put; the text area grows inside it.
+
 ## Settings
 
-The settings window lists theme, font, size, hinting, word wrap, tab stop, remember indent, opacity, blur, edge, automatic close, display, and syntax. Follow-cursor and a pinned display are mutually exclusive. The pin defaults to the primary display and falls back to it when the saved display is gone. A different resolution reclamps the drawer to that output without forgetting a larger saved size. Themes are the iced set, including the light and dark variants of Solarized, Gruvbox, Catppuccin, Tokyo Night, and Kanagawa. The default is Dracula. Light themes highlight with Inspired GitHub. Dark themes highlight with Base16 Ocean.
+The settings window lists theme, font, size, hinting, word wrap, compact layout, tab stop, remember indent, opacity, blur, edge, automatic close, display, and syntax. Follow-cursor and a pinned display are mutually exclusive. The pin defaults to the primary display and falls back to it when the saved display is gone. A different resolution reclamps the drawer to that output without forgetting a larger saved size. Themes are the iced set, including the light and dark variants of Solarized, Gruvbox, Catppuccin, Tokyo Night, and Kanagawa. The default is Dracula. Light themes highlight with Inspired GitHub. Dark themes highlight with Base16 Ocean.
 
 Automatic close is on by default. Off ignores a click outside and an unfocus, and Escape still hides the drawer while it is focused. The global hotkey still toggles it. Focus is not kept after a click outside.
 

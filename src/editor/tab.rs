@@ -428,6 +428,11 @@ impl Tab {
         cosmic_text::layout_snap(lines, bytes, first, last)
     }
 
+    /// Number of lines in the buffer. 1 for an empty buffer.
+    pub fn line_count(&self) -> u32 {
+        self.content.line_count().max(1) as u32
+    }
+
     pub fn text(&self) -> String {
         self.content.text()
     }

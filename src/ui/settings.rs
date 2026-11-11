@@ -15,6 +15,7 @@ pub struct Model {
     pub text_size: f32,
     pub text_unit: TextUnit,
     pub word_wrap: bool,
+    pub compact: bool,
     pub tab_stop: TabStop,
     pub remember_indent: bool,
     pub hinting: bool,
@@ -97,6 +98,10 @@ pub fn view(model: Model) -> Element<'static, Message> {
             labeled(
                 "Wrap",
                 toggle_button("Word wrap", model.word_wrap, Message::ToggleWrap),
+            ),
+            labeled(
+                "Layout",
+                toggle_button("Compact", model.compact, Message::ToggleCompact),
             ),
             labeled("Tabs", tabs),
             labeled(

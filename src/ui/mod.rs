@@ -29,6 +29,10 @@ pub struct Drawer<'a> {
     pub columns: u32,
     pub rows: u32,
     pub height: u32,
+    /// Padding around the glyphs, from the saved layout choice.
+    pub pad: u32,
+    /// Pre-computed gutter width (0 when line numbers are off).
+    pub gutter: u32,
     pub text_size: f32,
     pub font: Font,
     pub syntax: highlighter::Theme,
@@ -58,7 +62,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
     // One band sits behind the gutter and the text, so the padding between
     // them does not split the highlight.
     let highlight: Element<'a, Message> =
-        line_highlight(&view.slots, cell.height as f32, view.lead);
+        line_highlight(&view.slots, cell.height as f32, view.lead, drawer.pad);
     let field: Element<'a, Message> = text_editor(&tab.content)
         .id(EDITOR_ID.clone())
         .font(drawer.font)
@@ -66,7 +70,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .line_height(iced_core::text::LineHeight::Absolute(Pixels(
             cell.height as f32,
         )))
-        .padding(geom::EDITOR_PAD as f32)
+        .padding(drawer.pad as f32)
         .wrapping(wrapping)
         .height(Length::Fill)
         .style(editor_style)
@@ -81,7 +85,14 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .into();
     let mut band_parts: Vec<Element<'a, Message>> = Vec::with_capacity(2);
     if drawer.line_numbers {
-        band_parts.push(gutter(&view.slots, drawer.text_size, cell, view.lead));
+        band_parts.push(gutter(
+            &view.slots,
+            drawer.text_size,
+            cell,
+            view.lead,
+            drawer.pad,
+            drawer.gutter,
+        ));
     }
     band_parts.push(editor);
     let band: Element<'a, Message> = row(band_parts).height(Length::Fill).into();
@@ -316,8 +327,13 @@ fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Styl
     style
 }
 
-fn line_highlight(slots: &[Slot], row_height: f32, lead: f32) -> Element<'static, Message> {
-    let (pad, heights) = row_boxes(slots.len(), row_height, lead);
+fn line_highlight(
+    slots: &[Slot],
+    row_height: f32,
+    lead: f32,
+    editor_pad: u32,
+) -> Element<'static, Message> {
+    let (pad, heights) = row_boxes(slots.len(), row_height, lead, editor_pad);
     let mut rows = Vec::with_capacity(slots.len() + 1);
     rows.push(space().height(Length::Fixed(pad)).into());
     for (slot, height) in slots.iter().zip(heights) {
@@ -354,8 +370,10 @@ fn gutter(
     text_size: f32,
     cell: geom::Cell,
     lead: f32,
+    editor_pad: u32,
+    width: u32,
 ) -> Element<'static, Message> {
-    let (pad, heights) = row_boxes(slots.len(), cell.height as f32, lead);
+    let (pad, heights) = row_boxes(slots.len(), cell.height as f32, lead, editor_pad);
     let numbers: Vec<Element<'static, Message>> = slots
         .iter()
         .zip(heights)
@@ -387,14 +405,14 @@ fn gutter(
         })
         .collect();
     container(column(numbers).spacing(0))
-        .width(Length::Fixed(geom::gutter_width(cell) as f32))
+        .width(Length::Fixed(width as f32))
         .height(Length::Fill)
         .clip(true)
         .padding(iced::Padding {
             top: pad,
-            right: 8.0,
+            right: (editor_pad / 2) as f32,
             bottom: 0.0,
-            left: 8.0,
+            left: (editor_pad / 2) as f32,
         })
         .into()
 }
@@ -404,10 +422,10 @@ fn gutter(
 /// The editor scrolls by pixels and clips to the text box. A row that starts
 /// above that box is shorter by the hidden pixels, so the number stays on the
 /// glyphs instead of sliding into the padding.
-fn row_boxes(count: usize, row_height: f32, lead: f32) -> (f32, Vec<f32>) {
+fn row_boxes(count: usize, row_height: f32, lead: f32, editor_pad: u32) -> (f32, Vec<f32>) {
     let lead = if lead.is_finite() { lead } else { 0.0 };
     let hidden = if lead < 0.0 { -lead } else { 0.0 };
-    let pad = geom::EDITOR_PAD as f32 + lead.max(0.0);
+    let pad = editor_pad as f32 + lead.max(0.0);
     let heights = (0..count)
         .map(|index| {
             if index == 0 {

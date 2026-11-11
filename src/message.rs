@@ -19,7 +19,7 @@ pub fn open_layer(settings: NewLayerShellSettings) -> (window::Id, iced::Task<Me
 }
 
 /// Client size of the settings window.
-pub const SETTINGS_SIZE: (u32, u32) = (460, 740);
+pub const SETTINGS_SIZE: (u32, u32) = (460, 788);
 
 /// Opens the settings window on the overlay layer, centered on the output.
 ///
@@ -71,6 +71,8 @@ pub enum Message {
     SetEdge(Edge),
     ToggleLineNumbers,
     ToggleWrap,
+    /// Tight padding and gutter around the glyphs.
+    ToggleCompact,
     TabStop(TabStop),
     /// Enter repeats the current line's indent when this is on.
     ToggleRememberIndent,

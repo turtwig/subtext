@@ -53,6 +53,9 @@ pub struct Snapshot {
     pub line_numbers: bool,
     #[serde(default)]
     pub word_wrap: bool,
+    /// Tight padding and gutter around the glyphs. Off leaves the breezy layout.
+    #[serde(default)]
+    pub compact: bool,
     /// Pixel size of the drawer. Zero means the size comes from the column and row counts.
     #[serde(default)]
     pub width: u32,
@@ -176,6 +179,7 @@ mod tests {
             theme: ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,
+            compact: true,
             width: 800,
             height: 400,
             width_restore: 640,
@@ -214,6 +218,7 @@ mod tests {
         assert!(!snapshot.span_width);
         assert!(snapshot.line_numbers);
         assert!(!snapshot.word_wrap);
+        assert!(!snapshot.compact);
         assert_eq!(snapshot.across_width, 0);
         assert_eq!(snapshot.side_width, 0);
         assert_eq!(snapshot.opacity, 1.0);

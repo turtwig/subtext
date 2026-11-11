@@ -24,8 +24,15 @@ pub const BAR: u32 = 40;
 pub const FIND_BAR: u32 = 36;
 /// Padding inside the editor, around the glyphs.
 pub const EDITOR_PAD: u32 = 16;
+/// Padding when the compact layout is on.
+pub const COMPACT_PAD: u32 = 8;
 /// Vertical scrollbar reserved beside the editor.
 pub const SCROLLBAR: u32 = 12;
+
+/// Editor padding for the saved layout choice.
+pub fn editor_pad(compact: bool) -> u32 {
+    if compact { COMPACT_PAD } else { EDITOR_PAD }
+}
 
 pub const MIN_COLS: u32 = 40;
 pub const MIN_ROWS: u32 = 6;
@@ -89,59 +96,73 @@ impl Cell {
 }
 
 /// Pixels outside the character grid on the horizontal axis.
-pub fn horizontal_chrome(edge: Edge) -> u32 {
+pub fn horizontal_chrome(edge: Edge, pad: u32) -> u32 {
     let handles = match edge {
         Edge::Top | Edge::Bottom => HANDLE * 2,
         Edge::Left | Edge::Right => HANDLE,
     };
-    handles + EDITOR_PAD * 2 + SCROLLBAR
+    handles + pad * 2 + SCROLLBAR
 }
 
-/// Fixed gutter for four-digit line numbers, plus a gap before the text.
-pub fn gutter_width(cell: Cell) -> u32 {
-    4 * cell.width + 16
+/// Fixed gutter: digit-width columns for `digits`, plus the gap before the text.
+pub fn gutter_width(cell: Cell, digits: u32, pad: u32) -> u32 {
+    digits * cell.width + pad
 }
 
 /// Pixels outside the character grid on the vertical axis.
-pub fn vertical_chrome(edge: Edge) -> u32 {
+pub fn vertical_chrome(edge: Edge, pad: u32) -> u32 {
     match edge {
-        Edge::Top | Edge::Bottom => HANDLE + BAR + EDITOR_PAD * 2,
-        Edge::Left | Edge::Right => HANDLE * 2 + BAR + EDITOR_PAD * 2,
+        Edge::Top | Edge::Bottom => HANDLE + BAR + pad * 2,
+        Edge::Left | Edge::Right => HANDLE * 2 + BAR + pad * 2,
     }
 }
 
-pub fn pixel_size(edge: Edge, columns: u32, rows: u32, cell: Cell, gutter: u32) -> (u32, u32) {
+pub fn pixel_size(
+    edge: Edge,
+    columns: u32,
+    rows: u32,
+    cell: Cell,
+    gutter: u32,
+    pad: u32,
+) -> (u32, u32) {
     (
-        horizontal_chrome(edge) + gutter + columns * cell.width,
-        vertical_chrome(edge) + rows * cell.height,
+        horizontal_chrome(edge, pad) + gutter + columns * cell.width,
+        vertical_chrome(edge, pad) + rows * cell.height,
     )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn max_columns(edge: Edge, output_width: u32, cell: Cell, gutter: u32) -> u32 {
-    output_width.saturating_sub(horizontal_chrome(edge) + gutter) / cell.width.max(1)
+pub fn max_columns(edge: Edge, output_width: u32, cell: Cell, gutter: u32, pad: u32) -> u32 {
+    output_width.saturating_sub(horizontal_chrome(edge, pad) + gutter) / cell.width.max(1)
 }
 
-pub fn max_rows(edge: Edge, output_height: u32, cell: Cell) -> u32 {
-    output_height.saturating_sub(vertical_chrome(edge)) / cell.height.max(1)
+pub fn max_rows(edge: Edge, output_height: u32, cell: Cell, pad: u32) -> u32 {
+    output_height.saturating_sub(vertical_chrome(edge, pad)) / cell.height.max(1)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn clamp_columns(edge: Edge, columns: u32, output_width: u32, cell: Cell, gutter: u32) -> u32 {
-    let max = max_columns(edge, output_width, cell, gutter).max(MIN_COLS);
+pub fn clamp_columns(
+    edge: Edge,
+    columns: u32,
+    output_width: u32,
+    cell: Cell,
+    gutter: u32,
+    pad: u32,
+) -> u32 {
+    let max = max_columns(edge, output_width, cell, gutter, pad).max(MIN_COLS);
     columns.clamp(MIN_COLS, max)
 }
 
-pub fn clamp_rows(edge: Edge, rows: u32, output_height: u32, cell: Cell) -> u32 {
-    let max = max_rows(edge, output_height, cell).max(MIN_ROWS);
+pub fn clamp_rows(edge: Edge, rows: u32, output_height: u32, cell: Cell, pad: u32) -> u32 {
+    let max = max_rows(edge, output_height, cell, pad).max(MIN_ROWS);
     rows.clamp(MIN_ROWS, max)
 }
 
 /// Default row count: 40% of the output, rounded down to a whole row.
-pub fn default_rows(edge: Edge, output_height: u32, cell: Cell) -> u32 {
+pub fn default_rows(edge: Edge, output_height: u32, cell: Cell, pad: u32) -> u32 {
     let target = output_height.saturating_mul(2) / 5;
-    let rows = target.saturating_sub(vertical_chrome(edge)) / cell.height.max(1);
-    clamp_rows(edge, rows.max(MIN_ROWS), output_height, cell)
+    let rows = target.saturating_sub(vertical_chrome(edge, pad)) / cell.height.max(1);
+    clamp_rows(edge, rows.max(MIN_ROWS), output_height, cell, pad)
 }
 
 /// Top of the editor band and its height, in window pixels.
@@ -415,26 +436,47 @@ mod tests {
     #[test]
     fn pixel_size_is_chrome_plus_whole_cells() {
         let cell = Cell::for_text_size(TEXT_SIZE);
-        let (w, h) = pixel_size(Edge::Bottom, 120, 10, cell, 0);
-        assert_eq!(w, horizontal_chrome(Edge::Bottom) + 120 * CELL_W);
-        assert_eq!(h, vertical_chrome(Edge::Bottom) + 10 * CELL_H);
-        assert_eq!(w % 2, horizontal_chrome(Edge::Bottom) % 2);
+        let pad = EDITOR_PAD;
+        let (w, h) = pixel_size(Edge::Bottom, 120, 10, cell, 0, pad);
+        assert_eq!(w, horizontal_chrome(Edge::Bottom, pad) + 120 * CELL_W);
+        assert_eq!(h, vertical_chrome(Edge::Bottom, pad) + 10 * CELL_H);
+        assert_eq!(w % 2, horizontal_chrome(Edge::Bottom, pad) % 2);
+    }
+
+    #[test]
+    fn compact_padding_reclaims_room_from_every_side() {
+        let cell = Cell::for_text_size(TEXT_SIZE);
+        let breezy = pixel_size(Edge::Bottom, 120, 10, cell, 0, editor_pad(false));
+        let compact = pixel_size(Edge::Bottom, 120, 10, cell, 0, editor_pad(true));
+        assert_eq!(breezy.0 - compact.0, (EDITOR_PAD - COMPACT_PAD) * 2);
+        assert_eq!(breezy.1 - compact.1, (EDITOR_PAD - COMPACT_PAD) * 2);
+        assert_eq!(
+            gutter_width(cell, 1, editor_pad(true)),
+            gutter_width(cell, 1, editor_pad(false)) - 8
+        );
+        // 5-digit gutter is wider than a 1-digit one by 4 cells.
+        assert_eq!(
+            gutter_width(cell, 5, editor_pad(true)) - gutter_width(cell, 1, editor_pad(true)),
+            4 * cell.width
+        );
     }
 
     #[test]
     fn clamps_to_cells_that_fit_the_output() {
         let edge = Edge::Bottom;
         let cell = Cell::for_text_size(TEXT_SIZE);
-        let output_w = horizontal_chrome(edge) + 50 * CELL_W + 7;
-        assert_eq!(clamp_columns(edge, 120, output_w, cell, 0), 50);
-        assert_eq!(clamp_columns(edge, 10, output_w, cell, 0), MIN_COLS);
+        let pad = EDITOR_PAD;
+        let output_w = horizontal_chrome(edge, pad) + 50 * CELL_W + 7;
+        assert_eq!(clamp_columns(edge, 120, output_w, cell, 0, pad), 50);
+        assert_eq!(clamp_columns(edge, 10, output_w, cell, 0, pad), MIN_COLS);
     }
 
     #[test]
     fn default_rows_are_about_forty_percent() {
         let cell = Cell::for_text_size(TEXT_SIZE);
-        let rows = default_rows(Edge::Bottom, 1080, cell);
-        let pixels = pixel_size(Edge::Bottom, DEFAULT_COLS, rows, cell, 0).1;
+        let pad = EDITOR_PAD;
+        let rows = default_rows(Edge::Bottom, 1080, cell, pad);
+        let pixels = pixel_size(Edge::Bottom, DEFAULT_COLS, rows, cell, 0, pad).1;
         assert!(pixels <= 1080 * 2 / 5 + CELL_H);
         assert!(rows >= MIN_ROWS);
     }
