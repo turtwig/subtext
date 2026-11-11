@@ -51,18 +51,14 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
     } else {
         iced_core::text::Wrapping::None
     };
-    let view = tab.viewport(
-        drawer.columns,
-        drawer.word_wrap,
-        tab.scroll_lines,
-        drawer.rows,
-    );
+    let view = tab.viewport(drawer.rows);
     // The renderer clips glyphs to this box. Without it, unwrapped lines paint
     // across the scrollbar. The plate behind this stack is the only fill, so
     // the editor itself stays clear and the caret row can show through.
     // One band sits behind the gutter and the text, so the padding between
     // them does not split the highlight.
-    let highlight: Element<'a, Message> = line_highlight(&view.slots, cell.height);
+    let highlight: Element<'a, Message> =
+        line_highlight(&view.slots, cell.height as f32, view.lead);
     let field: Element<'a, Message> = text_editor(&tab.content)
         .id(EDITOR_ID.clone())
         .font(drawer.font)
@@ -85,7 +81,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .into();
     let mut band_parts: Vec<Element<'a, Message>> = Vec::with_capacity(2);
     if drawer.line_numbers {
-        band_parts.push(gutter(&view.slots, drawer.text_size, cell));
+        band_parts.push(gutter(&view.slots, drawer.text_size, cell, view.lead));
     }
     band_parts.push(editor);
     let band: Element<'a, Message> = row(band_parts).height(Length::Fill).into();
@@ -100,7 +96,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         drawer.edge,
         drawer.height,
         view.total as usize,
-        tab.scroll_lines,
+        view.scroll,
         drawer.rows,
         find_extra,
     ));
@@ -320,23 +316,24 @@ fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Styl
     style
 }
 
-fn line_highlight(slots: &[Slot], row_height: u32) -> Element<'static, Message> {
+fn line_highlight(slots: &[Slot], row_height: f32, lead: f32) -> Element<'static, Message> {
+    let (pad, heights) = row_boxes(slots.len(), row_height, lead);
     let mut rows = Vec::with_capacity(slots.len() + 1);
-    rows.push(
-        space()
-            .height(Length::Fixed(geom::EDITOR_PAD as f32))
-            .into(),
-    );
-    for slot in slots {
+    rows.push(space().height(Length::Fixed(pad)).into());
+    for (slot, height) in slots.iter().zip(heights) {
         rows.push(
             container(space())
                 .width(Length::Fill)
-                .height(Length::Fixed(row_height as f32))
+                .height(Length::Fixed(height))
                 .style(if slot.current { caret_row } else { clear_row })
                 .into(),
         );
     }
-    column(rows).spacing(0).width(Length::Fill).into()
+    container(column(rows).spacing(0).width(Length::Fill))
+        .clip(true)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn caret_row(theme: &Theme) -> container::Style {
@@ -352,10 +349,17 @@ fn clear_row(_theme: &Theme) -> container::Style {
     container::Style::default()
 }
 
-fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, Message> {
+fn gutter(
+    slots: &[Slot],
+    text_size: f32,
+    cell: geom::Cell,
+    lead: f32,
+) -> Element<'static, Message> {
+    let (pad, heights) = row_boxes(slots.len(), cell.height as f32, lead);
     let numbers: Vec<Element<'static, Message>> = slots
         .iter()
-        .map(|slot| {
+        .zip(heights)
+        .map(|(slot, height)| {
             let label = slot
                 .number
                 .map(|number| number.to_string())
@@ -365,9 +369,7 @@ fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, 
                 text(label)
                     .size(gutter_text_size(text_size))
                     .font(Font::MONOSPACE)
-                    .line_height(iced_core::text::LineHeight::Absolute(Pixels(
-                        cell.height as f32,
-                    )))
+                    .line_height(iced_core::text::LineHeight::Absolute(Pixels(height)))
                     .align_x(alignment::Horizontal::Right)
                     .align_y(alignment::Vertical::Center)
                     .width(Length::Fill)
@@ -379,7 +381,7 @@ fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, 
                         })),
                     }),
             )
-            .height(Length::Fixed(cell.height as f32))
+            .height(Length::Fixed(height))
             .width(Length::Fill)
             .into()
         })
@@ -389,12 +391,33 @@ fn gutter(slots: &[Slot], text_size: f32, cell: geom::Cell) -> Element<'static, 
         .height(Length::Fill)
         .clip(true)
         .padding(iced::Padding {
-            top: geom::EDITOR_PAD as f32,
+            top: pad,
             right: 8.0,
             bottom: 0.0,
             left: 8.0,
         })
         .into()
+}
+
+/// Top inset and per-row heights for the gutter and the caret band.
+///
+/// The editor scrolls by pixels and clips to the text box. A row that starts
+/// above that box is shorter by the hidden pixels, so the number stays on the
+/// glyphs instead of sliding into the padding.
+fn row_boxes(count: usize, row_height: f32, lead: f32) -> (f32, Vec<f32>) {
+    let lead = if lead.is_finite() { lead } else { 0.0 };
+    let hidden = if lead < 0.0 { -lead } else { 0.0 };
+    let pad = geom::EDITOR_PAD as f32 + lead.max(0.0);
+    let heights = (0..count)
+        .map(|index| {
+            if index == 0 {
+                (row_height - hidden).max(1.0)
+            } else {
+                row_height
+            }
+        })
+        .collect();
+    (pad, heights)
 }
 
 /// Line numbers are smaller and dimmer than the buffer text.

@@ -19,13 +19,13 @@ pub fn open_layer(settings: NewLayerShellSettings) -> (window::Id, iced::Task<Me
 }
 
 /// Client size of the settings window.
-pub const SETTINGS_SIZE: (u32, u32) = (460, 660);
+pub const SETTINGS_SIZE: (u32, u32) = (460, 740);
 
 /// Opens the settings window on the overlay layer, centered on the output.
 ///
 /// An xdg window cannot stack above the drawer: normal windows sit under
 /// both `Top` and `Overlay`. `Bottom` hides the drawer behind the desktop.
-pub fn open_settings() -> (window::Id, iced::Task<Message>) {
+pub fn open_settings(output: OutputOption) -> (window::Id, iced::Task<Message>) {
     Message::layershell_open(NewLayerShellSettings {
         size: Some(SETTINGS_SIZE),
         layer: Layer::Overlay,
@@ -33,7 +33,7 @@ pub fn open_settings() -> (window::Id, iced::Task<Message>) {
         exclusive_zone: Some(0),
         margin: Some((0, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
-        output_option: OutputOption::Active,
+        output_option: output,
         events_transparent: false,
         namespace: Some("subtext-settings".into()),
     })
@@ -77,6 +77,10 @@ pub enum Message {
     ToggleHinting,
     /// When on, a click outside the drawer hides it.
     ToggleClickAway,
+    /// Slide out on the display the pointer is on. Turns the pinned display off.
+    ToggleFollowCursor,
+    /// Pin the drawer to this output name. Turns follow-cursor off.
+    ShowOn(String),
     /// Insert the configured tab unit at the caret, or before each selected line.
     Indent,
     /// Break the line at the caret. Remember-indent may repeat the prefix.

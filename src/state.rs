@@ -95,6 +95,13 @@ pub struct Snapshot {
     /// A click outside the drawer hides it. Off leaves that to Escape.
     #[serde(default = "default_on")]
     pub click_away: bool,
+    /// The drawer opens on the display under the pointer.
+    /// Mutually exclusive with a pinned `output_name`.
+    #[serde(default)]
+    pub follow_cursor: bool,
+    /// Pinned output name. Empty means the primary display.
+    #[serde(default)]
+    pub output_name: String,
 }
 
 fn default_on() -> bool {
@@ -185,6 +192,8 @@ mod tests {
             remember_indent: true,
             hinting: false,
             click_away: false,
+            follow_cursor: true,
+            output_name: "DP-2".into(),
         };
         write(&paths, &snapshot).unwrap();
         let loaded = read(&paths).unwrap().unwrap();
@@ -213,6 +222,8 @@ mod tests {
         assert!(!snapshot.remember_indent);
         assert!(snapshot.hinting);
         assert!(snapshot.click_away);
+        assert!(!snapshot.follow_cursor);
+        assert!(snapshot.output_name.is_empty());
         assert_eq!(snapshot.text_size, 16.0);
         assert_eq!(snapshot.text_unit, TextUnit::Pt);
     }

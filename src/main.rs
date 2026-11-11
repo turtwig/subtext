@@ -11,6 +11,7 @@ mod glibc_compat;
 mod ipc;
 mod look;
 mod message;
+mod output;
 mod slide;
 mod state;
 mod ui;

@@ -2739,6 +2739,7 @@ dependencies = [
  "tempfile",
  "uuid",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-plasma",
  "winit-core",
 ]

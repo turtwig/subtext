@@ -2,6 +2,7 @@
 
 use super::indent::{self, Caret};
 use super::syntax::Language;
+use super::wrap;
 use iced::widget::text_editor::{self, Action};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -165,24 +166,21 @@ impl Tab {
         });
     }
 
-    /// Applies `action`. Returns whether it was a wheel scroll, which should
-    /// not be pulled back to the cursor.
+    /// Applies `action`. Returns whether it was a wheel scroll.
     pub fn edit(&mut self, action: Action) -> bool {
         let wheel = matches!(action, Action::Scroll { .. });
-        if let Action::Scroll { lines } = &action {
-            self.scroll_lines = self.scroll_lines.saturating_add(*lines);
-        }
         let edits = action.is_edit();
         let before = edits.then(|| self.mark());
         self.content.perform(action);
         self.note_cursor();
-        if let Some(before) = before
-            && (before.text != self.text()
+        if let Some(before) = before {
+            if before.text != self.text()
                 || before.line != self.cursor_line
-                || before.column != self.cursor_column)
-        {
-            self.push_history(before);
-            self.dirty = true;
+                || before.column != self.cursor_column
+            {
+                self.push_history(before);
+                self.dirty = true;
+            }
         }
         wheel
     }
@@ -319,13 +317,39 @@ impl Tab {
         self.content = text_editor::Content::with_text(text);
         self.cursor_line = line;
         self.cursor_column = column;
-        // The new buffer is scrolled to the top. `sync_scroll` measures from here.
-        self.scroll_lines = 0;
+        // The new buffer starts at the top, at a 1px line height. Scrolling
+        // by the caret's buffer line parks that line at the top until the
+        // editor lays the real metrics out and brings the caret on screen.
+        self.scroll_lines = line as i32;
+        if line != 0 {
+            self.content.perform(Action::Scroll { lines: line as i32 });
+        }
         self.content.move_to(text_editor::Cursor {
             position: text_editor::Position { line, column },
             selection: None,
         });
         self.dirty = true;
+    }
+
+    /// Ask the editor to scroll the caret on screen at the next layout.
+    ///
+    /// Used when wrap changes. The editor only reveals the caret after the
+    /// cursor moves, so the caret is nudged and put back.
+    pub fn reveal_caret(&mut self) {
+        let line = self.cursor_line;
+        let column = self.cursor_column;
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line,
+                column: column.saturating_add(1),
+            },
+            selection: None,
+        });
+        self.content.move_to(text_editor::Cursor {
+            position: text_editor::Position { line, column },
+            selection: None,
+        });
+        self.note_cursor();
     }
 
     fn note_cursor(&mut self) {
@@ -355,68 +379,53 @@ impl Tab {
         self.note_cursor();
     }
 
-    /// Keep the tracked scroll inside the buffer, and on screen with the caret
-    /// after a move or an edit. Wheel scrolls are only clamped.
+    /// Remember the buffer line at the top of the editor's layout.
+    pub fn note_top_line(&mut self) {
+        let top = self.viewport(1).top_line;
+        self.scroll_lines = top as i32;
+    }
+
+    /// Visible rows from the editor's published layout.
     ///
-    /// `scroll_lines` counts visual rows. A wrapped line adds rows that are
-    /// not new buffer lines, and the editor scrolls one of those per tick.
-    pub fn sync_scroll(&mut self, columns: u32, wrap: bool, visible_rows: u32, wheel: bool) {
-        let view = self.viewport(columns, wrap, 0, 1);
-        let visible = visible_rows.max(1) as i32;
-        let max_scroll = (view.total as i32 - visible).max(0);
-        let mut scroll = self.scroll_lines;
-        if !wheel {
-            let line = view.caret as i32;
-            if line < scroll {
-                scroll = line;
-            } else if line >= scroll + visible {
-                scroll = line - visible + 1;
-            }
+    /// Before that layout exists, each buffer line is one row and
+    /// `scroll_lines` is the buffer line at the top.
+    pub fn viewport(&self, visible: u32) -> wrap::Viewport {
+        if let Some(snap) = self.editor_snap() {
+            return wrap::from_snap(&snap, visible, self.cursor_line, self.cursor_column);
         }
-        scroll = scroll.clamp(0, max_scroll);
-        self.scroll_by(scroll - self.scroll_lines);
-    }
-
-    /// Move the viewport so the caret's visual row is the first row.
-    /// Used when wrap changes, because the editor's pixel scroll is not a
-    /// logical line index.
-    pub fn show_caret(&mut self, columns: u32, wrap: bool, visible_rows: u32) {
-        let view = self.viewport(columns, wrap, 0, 1);
-        let visible = visible_rows.max(1) as i32;
-        let max_scroll = (view.total as i32 - visible).max(0);
-        let scroll = (view.caret as i32).clamp(0, max_scroll);
-        self.scroll_by(scroll - self.scroll_lines);
-    }
-
-    pub fn viewport(
-        &self,
-        columns: u32,
-        wrap: bool,
-        scroll: i32,
-        visible: u32,
-    ) -> super::wrap::Viewport {
-        let lines: Vec<String> = self
-            .content
-            .lines()
-            .map(|line| line.text.into_owned())
-            .collect();
-        super::wrap::viewport(
-            lines.iter().map(String::as_str),
-            columns,
-            wrap,
-            scroll,
+        let count = self.content.line_count().max(1);
+        let ends = vec![vec![0usize]; count];
+        wrap::from_ends(
+            &ends,
+            self.scroll_lines,
             visible,
             self.cursor_line,
             self.cursor_column,
         )
     }
 
-    fn scroll_by(&mut self, delta: i32) {
-        if delta == 0 {
-            return;
+    fn editor_snap(&self) -> Option<std::sync::Arc<cosmic_text::LayoutSnap>> {
+        let lines = self.content.line_count();
+        if lines == 0 {
+            return None;
         }
-        self.scroll_lines += delta;
-        self.content.perform(Action::Scroll { lines: delta });
+        let first = self
+            .content
+            .line(0)
+            .map(|line| cosmic_text::hash_line(&line.text))
+            .unwrap_or(0);
+        let last = self
+            .content
+            .line(lines - 1)
+            .map(|line| cosmic_text::hash_line(&line.text))
+            .unwrap_or(0);
+        let mut bytes = 0usize;
+        for index in 0..lines {
+            if let Some(line) = self.content.line(index) {
+                bytes += line.text.len();
+            }
+        }
+        cosmic_text::layout_snap(lines, bytes, first, last)
     }
 
     pub fn text(&self) -> String {
@@ -467,6 +476,16 @@ impl Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gutter_uses_the_editor_buffer() {
+        let mut tab = Tab::testing("gutter-snap alpha\ngutter-snap beta");
+        tab.edit(Action::Scroll { lines: 1 });
+        let view = tab.viewport(2);
+        assert_eq!(view.slots[0].number, Some(2));
+        assert_eq!(view.top_line, 1);
+        assert!(view.slots[1].number.is_none());
+    }
 
     #[test]
     fn undo_and_redo_walk_the_edits() {

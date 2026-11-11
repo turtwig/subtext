@@ -105,6 +105,11 @@ mod bidi_para;
 pub use self::buffer::*;
 mod buffer;
 
+#[cfg(feature = "std")]
+pub use self::gutter::{LayoutSnap, hash_line, layout_snap};
+#[cfg(feature = "std")]
+mod gutter;
+
 pub use self::buffer_line::*;
 mod buffer_line;
 

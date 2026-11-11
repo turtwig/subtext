@@ -5,6 +5,7 @@ use crate::editor::{Language, TabStop};
 use crate::geom::Edge;
 use crate::look::{FontChoice, TextUnit, ThemeChoice};
 use crate::message::Message;
+use crate::output::{self, Screen};
 use iced::widget::{button, column, container, pick_list, row, slider, text};
 use iced::{Border, Element, Length, Theme, alignment};
 
@@ -22,6 +23,10 @@ pub struct Model {
     pub blur: bool,
     pub edge: Edge,
     pub language: Language,
+    pub follow_cursor: bool,
+    pub screens: Vec<Screen>,
+    /// Pinned output. `None` while follow-cursor is on.
+    pub selected_output: Option<String>,
 }
 
 pub fn view(model: Model) -> Element<'static, Message> {
@@ -39,6 +44,20 @@ pub fn view(model: Model) -> Element<'static, Message> {
         .text_size(14.0);
     let tabs = pick_list(TabStop::ALL, Some(model.tab_stop), Message::TabStop)
         .width(Length::Fill)
+        .text_size(14.0);
+    let displays = output::choices(&model.screens);
+    let selected = model
+        .selected_output
+        .as_ref()
+        .and_then(|name| displays.iter().find(|choice| choice.name == *name).cloned());
+    let display = pick_list(displays, selected, |choice| Message::ShowOn(choice.name))
+        .placeholder(if model.follow_cursor {
+            "Follows the cursor"
+        } else {
+            "Primary"
+        })
+        .width(Length::Fill)
+        .menu_height(Length::Fixed(220.0))
         .text_size(14.0);
     let edges = row([
         edge_button(Edge::Bottom, model.edge),
@@ -106,6 +125,11 @@ pub fn view(model: Model) -> Element<'static, Message> {
                 toggle_button("Background", model.blur, Message::ToggleBlur),
             ),
             labeled("Edge", edges),
+            labeled(
+                "Follow",
+                toggle_button("Cursor", model.follow_cursor, Message::ToggleFollowCursor),
+            ),
+            labeled("Show on", display),
             labeled(
                 "Close",
                 toggle_button("Automatically", model.click_away, Message::ToggleClickAway),

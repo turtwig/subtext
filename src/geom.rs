@@ -156,6 +156,22 @@ pub fn editor_track(edge: Edge, window_height: u32, extra: u32) -> (f32, f32) {
     (top as f32, window_height.saturating_sub(outside) as f32)
 }
 
+/// The size to remember when the current one may have been clamped to the output.
+///
+/// A smaller display must not replace a larger preference. A size the user
+/// actually set, below the output, replaces it.
+pub fn preferred_size(memory: u32, current: u32, output: Option<u32>) -> u32 {
+    if current == 0 {
+        return memory;
+    }
+    // Until a configure arrives, the live size may already be the clamped one
+    // from the last session. Keep the larger stored preference.
+    if memory > current && output.is_none_or(|limit| limit > 0 && current >= limit) {
+        return memory;
+    }
+    current
+}
+
 /// Thumb height and its offset from the top of the track.
 pub fn thumb_span(track_h: f32, visible: u32, total: u32, scroll: i32) -> (f32, f32) {
     if track_h <= 1.0 {
@@ -585,6 +601,16 @@ mod tests {
             (10.0, screen_y + 10.0),
         );
         assert_eq!(height, start.1 + 20);
+    }
+
+    #[test]
+    fn a_clamped_drawer_keeps_the_larger_preference() {
+        assert_eq!(preferred_size(1400, 1000, Some(1000)), 1400);
+        assert_eq!(preferred_size(1400, 900, Some(1000)), 900);
+        assert_eq!(preferred_size(800, 1000, Some(1920)), 1000);
+        assert_eq!(preferred_size(800, 0, Some(1000)), 800);
+        assert_eq!(preferred_size(1400, 1000, None), 1400);
+        assert_eq!(preferred_size(0, 1000, None), 1000);
     }
 
     #[test]

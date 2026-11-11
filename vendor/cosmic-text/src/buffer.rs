@@ -485,6 +485,9 @@ impl Buffer {
         if old_scroll != self.scroll {
             self.redraw = true;
         }
+
+        #[cfg(feature = "std")]
+        crate::gutter::publish(self);
     }
 
     /// Convert a [`Cursor`] to a [`LayoutCursor`]
@@ -669,6 +672,8 @@ impl Buffer {
         if scroll != self.scroll {
             self.scroll = scroll;
             self.redraw = true;
+            #[cfg(feature = "std")]
+            crate::gutter::publish(self);
         }
     }
 

@@ -90,6 +90,16 @@ pub struct App {
     hinting: bool,
     /// Clicking outside the drawer hides it.
     click_away: bool,
+    /// Slide out on whichever display the pointer is on.
+    follow_cursor: bool,
+    /// Pinned output. Empty means the primary display.
+    output_name: String,
+    /// Connected displays. Empty until a Wayland round-trip succeeds.
+    screens: Vec<crate::output::Screen>,
+    /// Output the current drawer surface was created on.
+    bound_output: Option<String>,
+    /// The surface is closing so it can be opened on `bound_output`.
+    reopen_drawer: bool,
     /// 0 is fully past the anchor edge. 1 is the resting rectangle.
     slide: f32,
     motion: Option<Motion>,
@@ -114,6 +124,8 @@ pub struct App {
 impl App {
     pub fn boot() -> (Self, Task<Message>) {
         let mut app = Self::load();
+        app.refresh_screens();
+        app.bound_output = app.resolved_output();
         // Map once, blank, before the user asks. KWin's open animation then
         // runs against an empty frame at startup instead of on every toggle.
         let open = app.open_surface();
@@ -121,6 +133,11 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.note_editor_scroll();
+        self.dispatch(message)
+    }
+
+    fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Ipc(Command::Toggle) | Message::Toggle => self.toggle(),
             Message::Ipc(Command::Show) | Message::Show => self.show(),
@@ -139,12 +156,8 @@ impl App {
                 }
             }
             Message::Edit(action) => {
-                let rows = self.rows_on_screen();
-                let columns = self.columns;
-                let wrap = self.word_wrap;
                 if let Some(tab) = self.tabs.get_mut(self.active) {
-                    let wheel = tab.edit(action);
-                    tab.sync_scroll(columns, wrap, rows, wheel);
+                    tab.edit(action);
                 }
                 Task::none()
             }
@@ -196,11 +209,8 @@ impl App {
             Message::ToggleLineNumbers => self.toggle_line_numbers(),
             Message::ToggleWrap => {
                 self.word_wrap = !self.word_wrap;
-                let columns = self.columns;
-                let wrap = self.word_wrap;
-                let rows = self.rows_on_screen();
                 if let Some(tab) = self.tabs.get_mut(self.active) {
-                    tab.show_caret(columns, wrap, rows);
+                    tab.reveal_caret();
                 }
                 self.persist();
                 Task::none()
@@ -228,6 +238,8 @@ impl App {
                 self.persist();
                 Task::none()
             }
+            Message::ToggleFollowCursor => self.toggle_follow(),
+            Message::ShowOn(name) => self.show_on(name),
             Message::Indent => self.indent_active(false),
             Message::BreakLine => self.break_line(),
             Message::Backspace => self.backspace(),
@@ -362,8 +374,12 @@ impl App {
                     self.slide = 0.0;
                     self.motion = None;
                     self.hold_until = None;
-                    self.open_when_mapped = false;
                     self.mapped_at = None;
+                    if self.reopen_drawer {
+                        self.reopen_drawer = false;
+                        return self.open_surface();
+                    }
+                    self.open_when_mapped = false;
                     self.persist();
                     return self.close_settings();
                 }
@@ -396,6 +412,13 @@ impl App {
                 blur: self.blur,
                 edge: self.edge,
                 language,
+                follow_cursor: self.follow_cursor,
+                screens: self.screens.clone(),
+                selected_output: if self.follow_cursor {
+                    None
+                } else {
+                    crate::output::choose(false, &self.output_name, &self.screens, None)
+                },
             });
         }
         let confirm_close = self
@@ -518,6 +541,11 @@ impl App {
             remember_indent: false,
             hinting: true,
             click_away: true,
+            follow_cursor: false,
+            output_name: String::new(),
+            screens: Vec::new(),
+            bound_output: None,
+            reopen_drawer: false,
             slide: 0.0,
             motion: None,
             mapped_at: None,
@@ -549,6 +577,8 @@ impl App {
         app.word_wrap = snapshot.word_wrap;
         app.hinting = snapshot.hinting;
         app.click_away = snapshot.click_away;
+        app.follow_cursor = snapshot.follow_cursor;
+        app.output_name = snapshot.output_name;
         app.width = snapshot.width;
         app.height = snapshot.height;
         app.width_restore = snapshot.width_restore;
@@ -582,6 +612,12 @@ impl App {
     fn show(&mut self) -> Task<Message> {
         self.suppress_unfocus_until = Instant::now() + UNFOCUS_GRACE;
         self.recall_cursor();
+        self.refresh_screens();
+        let target = self.resolved_output();
+        if self.bound_output != target {
+            self.open_when_mapped = true;
+            return self.retarget(target);
+        }
         if self.surface.is_none() {
             self.open_when_mapped = true;
             return self.open_surface();
@@ -672,9 +708,6 @@ impl App {
             return Task::none();
         }
         let query = self.find_query.clone();
-        let columns = self.columns;
-        let wrap = self.word_wrap;
-        let rows = self.rows_on_screen();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return Task::none();
         };
@@ -706,7 +739,6 @@ impl App {
             place.end.line,
             place.end.column,
         );
-        tab.sync_scroll(columns, wrap, rows, false);
         Task::none()
     }
 
@@ -737,14 +769,11 @@ impl App {
     }
 
     fn recall_cursor(&mut self) {
-        let rows = self.rows_on_screen();
-        let columns = self.columns;
-        let wrap = self.word_wrap;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
         tab.recall_cursor();
-        tab.sync_scroll(columns, wrap, rows, false);
+        tab.reveal_caret();
     }
 
     fn hide(&mut self) -> Task<Message> {
@@ -1120,7 +1149,8 @@ impl App {
         if self.settings_window.is_some() {
             return self.close_settings();
         }
-        let (id, open) = crate::message::open_settings();
+        self.refresh_screens();
+        let (id, open) = crate::message::open_settings(self.output_option());
         self.settings_window = Some(id);
         // Settings is an overlay surface. `Top` keeps the drawer above ordinary
         // windows and below that overlay, so theme changes stay visible.
@@ -1262,7 +1292,10 @@ impl App {
         let (line_count, scroll) = self
             .tabs
             .get(self.active)
-            .map(|tab| (self.visual_total_of(tab), tab.scroll_lines))
+            .map(|tab| {
+                let view = tab.viewport(rows);
+                (view.total, view.scroll)
+            })
             .unwrap_or((1, 0));
         let (thumb_h, offset) = geom::thumb_span(track_h, rows, line_count, scroll);
         let local = point.y - top;
@@ -1285,7 +1318,7 @@ impl App {
         let line_count = self
             .tabs
             .get(self.active)
-            .map(|tab| self.visual_total_of(tab))
+            .map(|tab| tab.viewport(rows).total)
             .unwrap_or(1);
         let (thumb_h, _) = geom::thumb_span(track_h, rows, line_count, 0);
         let max_scroll = line_count.saturating_sub(rows) as i32;
@@ -1296,26 +1329,17 @@ impl App {
 
     fn scroll_active_to(&mut self, line: i32) {
         let rows = self.rows_on_screen();
-        let columns = self.columns;
-        let wrap = self.word_wrap;
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
-        let total = tab.viewport(columns, wrap, 0, 1).total as i32;
-        let max_scroll = (total - rows as i32).max(0);
+        let view = tab.viewport(rows);
+        let max_scroll = (view.total as i32 - rows as i32).max(0);
         let line = line.clamp(0, max_scroll);
-        let delta = line - tab.scroll_lines;
+        let delta = line - view.scroll;
         if delta == 0 {
             return;
         }
         tab.edit(iced::widget::text_editor::Action::Scroll { lines: delta });
-        tab.sync_scroll(columns, wrap, rows, true);
-    }
-
-    fn visual_total_of(&self, tab: &Tab) -> u32 {
-        tab.viewport(self.columns, self.word_wrap, 0, 1)
-            .total
-            .max(1)
     }
 
     fn drag_to(&mut self, point: Point) -> Task<Message> {
@@ -1378,9 +1402,15 @@ impl App {
         if width < 2 || height < 2 {
             return Task::none();
         }
+        let changed = self.output_width != Some(width) || self.output_height != Some(height);
         self.output_width = Some(width);
         self.output_height = Some(height);
-        if self.span_width {
+        if changed && !self.capturing {
+            // A new display brings its own resolution. Restore the size the
+            // user saved, then clamp it to this output.
+            self.restore_axis();
+        }
+        if self.span_width && self.edge.horizontal() {
             self.width = width;
         }
         self.reclamp();
@@ -1589,17 +1619,116 @@ impl App {
 
     fn layer_settings(&self) -> NewLayerShellSettings {
         let (anchor, size, margin) = self.shell_layout();
+        let layer = if self.dialog_open {
+            Layer::Bottom
+        } else if self.settings_window.is_some() {
+            Layer::Top
+        } else {
+            Layer::Overlay
+        };
         NewLayerShellSettings {
             size: Some(size),
-            layer: Layer::Overlay,
+            layer,
             anchor,
             exclusive_zone: Some(0),
             margin: Some(margin),
             keyboard_interactivity: KeyboardInteractivity::None,
-            output_option: OutputOption::Active,
+            output_option: self.output_option(),
             events_transparent: false,
             namespace: Some("subtext".into()),
         }
+    }
+
+    fn output_option(&self) -> OutputOption {
+        match &self.bound_output {
+            Some(name) if !name.is_empty() => OutputOption::OutputName(name.clone()),
+            _ => OutputOption::Active,
+        }
+    }
+
+    fn refresh_screens(&mut self) {
+        let found = crate::output::list();
+        if !found.is_empty() {
+            self.screens = found;
+        }
+    }
+
+    /// Where the next surface should be created. `None` leaves the choice to
+    /// the compositor.
+    fn resolved_output(&mut self) -> Option<String> {
+        let active = if self.follow_cursor {
+            crate::output::active_name()
+        } else {
+            None
+        };
+        let choice = crate::output::choose(
+            self.follow_cursor,
+            &self.output_name,
+            &self.screens,
+            active.as_deref(),
+        );
+        if !self.follow_cursor
+            && let Some(name) = choice.clone()
+        {
+            let saved_gone = !self.output_name.is_empty()
+                && !self
+                    .screens
+                    .iter()
+                    .any(|screen| screen.name == self.output_name);
+            if saved_gone {
+                self.output_name = name;
+                self.persist();
+            }
+        }
+        choice
+    }
+
+    /// Close the current surface, if there is one, and open another on `name`.
+    fn retarget(&mut self, name: Option<String>) -> Task<Message> {
+        self.bound_output = name;
+        if let Some(id) = self.surface {
+            self.reopen_drawer = true;
+            return window::close(id);
+        }
+        self.open_surface()
+    }
+
+    fn toggle_follow(&mut self) -> Task<Message> {
+        self.follow_cursor = !self.follow_cursor;
+        self.persist();
+        if !self.wants_open() {
+            if self.follow_cursor {
+                return Task::none();
+            }
+            self.refresh_screens();
+            let target = self.resolved_output();
+            if self.bound_output == target {
+                return Task::none();
+            }
+            return self.retarget(target);
+        }
+        self.refresh_screens();
+        let target = self.resolved_output();
+        if self.bound_output == target {
+            return Task::none();
+        }
+        self.open_when_mapped = true;
+        self.retarget(target)
+    }
+
+    fn show_on(&mut self, name: String) -> Task<Message> {
+        self.follow_cursor = false;
+        self.output_name = name;
+        self.persist();
+        self.refresh_screens();
+        let target = self.resolved_output();
+        if self.bound_output == target {
+            return Task::none();
+        }
+        if self.wants_open() {
+            self.open_when_mapped = true;
+        }
+        self.retarget(target)
     }
 
     /// Always the whole output. Size 0 with every edge anchored asks the
@@ -1613,13 +1742,21 @@ impl App {
 
     fn remember_active(&mut self) {
         if self.edge.horizontal() {
-            self.across_width = self.width;
-            self.across_height = self.height;
-            self.across_restore = self.width_restore;
+            if self.span_width {
+                self.across_width = self.width;
+            } else {
+                self.across_width =
+                    geom::preferred_size(self.across_width, self.width, self.output_width);
+            }
+            self.across_height =
+                geom::preferred_size(self.across_height, self.height, self.output_height);
+            self.across_restore =
+                geom::preferred_size(self.across_restore, self.width_restore, self.output_width);
             self.across_span = self.span_width;
         } else {
-            self.side_width = self.width;
-            self.side_height = self.height;
+            self.side_width = geom::preferred_size(self.side_width, self.width, self.output_width);
+            self.side_height =
+                geom::preferred_size(self.side_height, self.height, self.output_height);
         }
     }
 
@@ -1701,6 +1838,7 @@ impl App {
     }
 
     fn persist(&mut self) {
+        self.note_editor_scroll();
         self.remember_active();
         for tab in &mut self.tabs {
             if let Err(error) = tab.write_buffer() {
@@ -1735,6 +1873,8 @@ impl App {
             remember_indent: self.remember_indent,
             hinting: self.hinting,
             click_away: self.click_away,
+            follow_cursor: self.follow_cursor,
+            output_name: self.output_name.clone(),
         };
         if let Err(error) = state::write(&self.paths, &snapshot) {
             eprintln!("subtext: could not write state: {error}");
@@ -1743,59 +1883,52 @@ impl App {
 
     fn backspace(&mut self) -> Task<Message> {
         let unit = self.tab_stop.unit();
-        let columns = self.columns;
-        let wrap = self.word_wrap;
-        let rows = self.rows_on_screen();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if !tab.eat_indent(unit) {
                 tab.edit(iced::widget::text_editor::Action::Edit(
                     iced::widget::text_editor::Edit::Backspace,
                 ));
             }
-            tab.sync_scroll(columns, wrap, rows, false);
         }
         Task::none()
     }
 
     fn break_line(&mut self) -> Task<Message> {
         let unit = self.remember_indent.then(|| self.tab_stop.unit());
-        let columns = self.columns;
-        let wrap = self.word_wrap;
-        let rows = self.rows_on_screen();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.break_line(unit);
-            tab.sync_scroll(columns, wrap, rows, false);
         }
         Task::none()
     }
 
     fn indent_active(&mut self, outdent: bool) -> Task<Message> {
         let unit = self.tab_stop.unit();
-        let columns = self.columns;
-        let wrap = self.word_wrap;
-        let rows = self.rows_on_screen();
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if outdent {
                 tab.unindent(unit);
             } else {
                 tab.indent(unit);
             }
-            tab.sync_scroll(columns, wrap, rows, false);
         }
         Task::none()
     }
 
     fn history(&mut self, undo: bool) -> Task<Message> {
-        let columns = self.columns;
-        let wrap = self.word_wrap;
-        let rows = self.rows_on_screen();
         if let Some(tab) = self.tabs.get_mut(self.active) {
-            let changed = if undo { tab.undo() } else { tab.redo() };
-            if changed {
-                tab.sync_scroll(columns, wrap, rows, false);
+            if undo {
+                tab.undo();
+            } else {
+                tab.redo();
             }
         }
         Task::none()
+    }
+
+    /// Keep the saved scroll on the buffer line the editor is showing.
+    fn note_editor_scroll(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.note_top_line();
+        }
     }
 
     /// A scratch tab stays open beside any real files.
@@ -2038,6 +2171,8 @@ mod tests {
             remember_indent: false,
             hinting: true,
             click_away: true,
+            follow_cursor: false,
+            output_name: String::new(),
         }
     }
 

@@ -46,7 +46,7 @@ Tab inserts the configured unit at the caret, or indents each selected line. Shi
 
 Find is case-insensitive, wraps, and counts matches. An empty query does not move. Folding compares one source character with one query character.
 
-Word wrap uses cosmic-text's word wrap. Line numbers count buffer lines. A wrapped continuation has no number. The caret line is one highlight behind the gutter and the text, and it does not cover the scrollbar.
+Word wrap uses cosmic-text's word wrap. Line numbers count buffer lines and follow the layout the editor already drew, so a resize does not shape the file again. A wrapped continuation has no number. The caret line is one highlight behind the gutter and the text, and it does not cover the scrollbar.
 
 Syntax is a fixed list: plain text, Rust, Markdown, Python, TOML, JSON, JavaScript, TypeScript, HTML, CSS, C, C++, Go, shell, Lua, and YAML. Opening a file picks the language from the extension. The menu can override it.
 
@@ -60,7 +60,7 @@ The tab row sits on the screen-edge side: below the editor for a bottom drawer, 
 
 ## Settings
 
-The settings window lists theme, font, size, hinting, word wrap, tab stop, remember indent, opacity, blur, edge, automatic close, and syntax. Themes are the iced set, including the light and dark variants of Solarized, Gruvbox, Catppuccin, Tokyo Night, and Kanagawa. The default is Dracula. Light themes highlight with Inspired GitHub. Dark themes highlight with Base16 Ocean.
+The settings window lists theme, font, size, hinting, word wrap, tab stop, remember indent, opacity, blur, edge, automatic close, display, and syntax. Follow-cursor and a pinned display are mutually exclusive. The pin defaults to the primary display and falls back to it when the saved display is gone. A different resolution reclamps the drawer to that output without forgetting a larger saved size. Themes are the iced set, including the light and dark variants of Solarized, Gruvbox, Catppuccin, Tokyo Night, and Kanagawa. The default is Dracula. Light themes highlight with Inspired GitHub. Dark themes highlight with Base16 Ocean.
 
 Automatic close is on by default. Off ignores a click outside and an unfocus, and Escape still hides the drawer while it is focused. The global hotkey still toggles it. Focus is not kept after a click outside.
 
@@ -68,7 +68,7 @@ Automatic close is on by default. Off ignores a click outside and an unfocus, an
 
 `$XDG_CONFIG_HOME/subtext`, or `~/.config/subtext`:
 
-- `state.json` holds the anchor, both saved sizes, the active tab, cursor and scroll, and the settings.
+- `state.json` holds the anchor, both saved sizes, the active tab, cursor and scroll, the display choice, and the settings.
 - `scratch/` holds the text of scratch tabs.
 - File tabs store metadata only. The bytes live at the file path.
 
