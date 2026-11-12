@@ -47,9 +47,11 @@ The drawer slides in from the anchored edge. The surface itself stays mapped and
 
 ## Settings
 
-Settings is its own window, opened from the tab row, and the editor stays visible behind it. The controls are theme, installed monospace font, text size, glyph hinting, word wrap, tab characters, remember indent, background opacity, KWin blur, anchor edge, automatic close, and syntax. Changes apply immediately and are stored with the rest of the state.
+Settings is its own window, opened from the tab row, and the editor stays visible behind it. The controls are theme, editor font, UI font, text size, glyph hinting, word wrap, tab characters, remember indent, background opacity, KWin blur, anchor edge, border thickness, automatic close, and syntax. Changes apply immediately and are stored with the rest of the state.
 
-Text size is in points, matching a terminal at 96 DPI. The control next to the number switches between points and pixels without jumping the glyphs. System is the generic monospace face. Other choices are monospace families installed on the machine. Hinting is on by default. For a monospace face, each column is the hinted pixel width of that face at the current size, so a 16pt terminal cell and a Subtext cell land on the same pixels.
+Text size is in points, matching a terminal at 96 DPI. The control next to the number switches between points and pixels without jumping the glyphs. System is the generic monospace face. Other choices are monospace families installed on the machine. The UI font defaults to the editor face. A separate toggle makes the tab row and find bar use the editor's pixel size; otherwise that chrome stays at 14px. The settings window stays at 14px either way, so its layout does not move. Hinting is on by default. For a monospace face, each column is the hinted pixel width of that face at the current size, so a 16pt terminal cell and a Subtext cell land on the same pixels.
+
+The resize edges are a solid bar, in pixels, from 0 to 24. The bar runs the whole edge, and the text sits against it. Zero draws nothing. The drag target stays a few pixels wide and overlaps the text when the bar is thinner than that.
 
 Opacity fades the drawer plate. Blur, on KWin, frosts whatever is behind that plate. It has no separate strength. Lines on the tab row toggles line numbers. The numbers are smaller and dimmer than the buffer, follow the caret line, and skip rows that exist only because a line wrapped. Syntax colors follow the UI theme: light themes use Inspired GitHub, and dark themes use Base16 Ocean.
 
@@ -61,7 +63,7 @@ Open files, scratch text, the cursor, scroll position, anchor edge, sizes, and s
 - `scratch/` holds scratch tabs (`scratch_1.txt`, and so on).
 - A real file is written at its own path.
 
-The scratch directory can live on a shared folder, with each computer symlinking its config directory at that share. Subtext does not watch the files while the drawer is open. It rereads them when the drawer is shown, and again immediately before it writes.
+Share notes by symlinking only `scratch/` at a shared folder. Leave `state.json` on each machine, so window size, fonts, and the open tabs stay local. Symlinking the whole config directory would share that file too, and the two machines would overwrite each other's layout. Subtext does not watch the files while the drawer is open. It rereads them when the drawer is shown, and again immediately before it writes.
 
 Each open buffer remembers the text it last loaded or saved. That remembered text is the baseline. The next read compares three copies: the baseline, the text in the buffer, and the file on disk.
 
@@ -82,7 +84,7 @@ Delete every marker line and keep the text you want. A marker line is one that s
 
 If the file is deleted while this buffer has unsaved text, Subtext keeps the buffer and does not recreate the file. Ctrl+S writes it again. A scratch that has never been saved is still created on the next save.
 
-A save locks the file and replaces it only when it still contains the bytes just read. If the other computer saved first, this one reads that copy and merges instead of writing over it. Two saves that pass the lock do not share a temporary file.
+A save locks the file and replaces it only when it still contains the bytes just read. A missing file is not treated as empty, so a deleted note is not recreated by that check. If the other computer saved first, this one reads that copy and merges instead of writing over it. Two saves that pass the lock do not share a temporary file. The lock records this machine and the process. A live process is not interrupted. A lock from another machine is only taken after ten minutes.
 
 The same rules apply when a file is edited in another program while it is open here. Both computers need this version. A drawer that is already open picks the other copy up the next time it opens, and before it saves.
 

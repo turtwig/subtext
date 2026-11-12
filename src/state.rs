@@ -6,7 +6,7 @@
 use crate::editor::TabStop;
 use crate::editor::tab::Record;
 use crate::geom::Edge;
-use crate::look::{self, FontChoice, TextUnit, ThemeChoice};
+use crate::look::{self, FontChoice, TextUnit, ThemeChoice, UiFont};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -49,6 +49,16 @@ pub struct Snapshot {
     pub text_unit: TextUnit,
     #[serde(default)]
     pub font: FontChoice,
+    /// Face for the tab row, find bar, and settings. Missing means the editor face.
+    #[serde(default)]
+    pub ui_font: UiFont,
+    /// UI text uses the editor's pixel size. Off keeps the 14px chrome.
+    #[serde(default)]
+    pub ui_match_size: bool,
+    /// Painted thickness of a resize edge, in pixels. Zero hides it.
+    /// The drag target stays at least [`crate::geom::GRAB`] wide.
+    #[serde(default = "default_border")]
+    pub border: u32,
     #[serde(default)]
     pub theme: ThemeChoice,
     #[serde(default = "default_line_numbers")]
@@ -121,6 +131,10 @@ fn default_line_numbers() -> bool {
     true
 }
 
+fn default_border() -> u32 {
+    1
+}
+
 pub fn read(paths: &Paths) -> io::Result<Option<Snapshot>> {
     if !paths.state.exists() {
         return Ok(None);
@@ -153,9 +167,11 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Replace `path` only when its current bytes are still `expected`.
 ///
-/// A missing file matches an empty `expected`, which is how a new scratch is
-/// created. Any other change returns [`file_changed`] and leaves the file
-/// untouched, so the caller can read it again and merge.
+/// A missing file is not a match, even when `expected` is empty. An empty
+/// file that was deleted must not be recreated here. A path that has never
+/// been written goes through [`atomic_write_if_absent`]. Any other change
+/// returns [`file_changed`] and leaves the file untouched, so the caller can
+/// read it again and merge.
 pub(crate) fn atomic_write_if_matches(
     path: &Path,
     bytes: &[u8],
@@ -217,7 +233,6 @@ fn write_atomic(path: &Path, bytes: &[u8], replace: Replace<'_>) -> io::Result<(
         Replace::IfMatches(expected) => match fs::read(&path) {
             Ok(current) if current == expected => {}
             Ok(_) => return Err(file_changed()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && expected.is_empty() => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(file_changed()),
             Err(error) => return Err(error),
         },
@@ -293,10 +308,19 @@ fn lock_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// How long a lock may sit before another process treats it as a crash.
-const LOCK_STALE: Duration = Duration::from_secs(15);
+/// A lock whose owner we cannot see (another computer, or an unreadable
+/// file) may be taken after this. A live process on this machine is never
+/// stolen, however old the file is.
+const LOCK_FOREIGN: Duration = Duration::from_secs(10 * 60);
 
 struct LockFile(PathBuf);
+
+struct LockIdentity {
+    host: String,
+    pid: u32,
+    /// `starttime` from `/proc`. Zero when this process could not read it.
+    start: u64,
+}
 
 impl LockFile {
     fn acquire(path: &Path) -> io::Result<Self> {
@@ -304,7 +328,11 @@ impl LockFile {
         for _ in 0..40 {
             match OpenOptions::new().write(true).create_new(true).open(&lock) {
                 Ok(mut file) => {
-                    let _ = writeln!(file, "{}", std::process::id());
+                    if let Err(error) = write_identity(&mut file, &LockIdentity::current()) {
+                        drop(file);
+                        let _ = fs::remove_file(&lock);
+                        return Err(error);
+                    }
                     return Ok(Self(lock));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -327,14 +355,104 @@ impl Drop for LockFile {
     }
 }
 
-fn lock_is_stale(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    meta.modified()
+impl LockIdentity {
+    fn current() -> Self {
+        let pid = std::process::id();
+        Self {
+            host: local_host(),
+            pid,
+            start: process_start(pid).unwrap_or(0),
+        }
+    }
+}
+
+fn write_identity(file: &mut fs::File, id: &LockIdentity) -> io::Result<()> {
+    writeln!(file, "v1")?;
+    writeln!(file, "{}", id.host)?;
+    writeln!(file, "{}", id.pid)?;
+    writeln!(file, "{}", id.start)?;
+    file.sync_all()
+}
+
+fn local_host() -> String {
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = fs::read_to_string(path) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    "local".into()
+}
+
+/// `starttime` ticks from `/proc/<pid>/stat`, field 22. `None` when the
+/// process is gone or this is not a Linux procfs.
+fn process_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    // After the comm field: state is field 3, starttime is field 22.
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+enum Proc {
+    Gone,
+    /// `None` means the process exists but its start time could not be read.
+    Alive {
+        start: Option<u64>,
+    },
+}
+
+fn proc_state(pid: u32) -> Proc {
+    let path = format!("/proc/{pid}/stat");
+    match fs::read_to_string(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Proc::Gone,
+        Err(_) => Proc::Alive { start: None },
+        Ok(_) => Proc::Alive {
+            start: process_start(pid),
+        },
+    }
+}
+
+/// This pid is still the process that took the lock.
+fn process_holds(pid: u32, start: u64) -> bool {
+    match proc_state(pid) {
+        Proc::Gone => false,
+        Proc::Alive { start: actual } => match (start, actual) {
+            (0, _) => true,
+            (_, None) => true,
+            (expected, Some(actual)) => expected == actual,
+        },
+    }
+}
+
+fn lock_age(path: &Path) -> Option<Duration> {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-        .is_some_and(|age| age > LOCK_STALE)
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() >= 4 && lines[0] == "v1" {
+        let host = lines[1];
+        let pid: u32 = lines[2].parse().unwrap_or(0);
+        let start: u64 = lines[3].parse().unwrap_or(0);
+        if host == local_host() {
+            return pid == 0 || !process_holds(pid, start);
+        }
+        return lock_age(path).is_some_and(|age| age > LOCK_FOREIGN);
+    }
+    // The previous lock was only a pid. It was always written on this machine.
+    if lines.len() == 1
+        && let Ok(pid) = lines[0].trim().parse::<u32>()
+    {
+        return !process_holds(pid, 0);
+    }
+    // Empty, or still being written. Leave a young file alone.
+    lock_age(path).is_some_and(|age| age > LOCK_FOREIGN)
 }
 
 fn config_root() -> PathBuf {
@@ -371,6 +489,9 @@ mod tests {
             text_size: 16.0,
             text_unit: TextUnit::Pt,
             font: FontChoice::SYSTEM,
+            ui_font: UiFont::MatchEditor,
+            ui_match_size: false,
+            border: 1,
             theme: ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,
@@ -426,6 +547,60 @@ mod tests {
         assert!(snapshot.output_name.is_empty());
         assert_eq!(snapshot.text_size, 16.0);
         assert_eq!(snapshot.text_unit, TextUnit::Pt);
+        assert_eq!(snapshot.ui_font, UiFont::MatchEditor);
+        assert!(!snapshot.ui_match_size);
+        assert_eq!(snapshot.border, 1);
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_empty_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        let error = atomic_write_if_matches(&path, b"back", b"").unwrap_err();
+        assert!(is_file_changed(&error));
+        assert!(!path.exists());
+        fs::write(&path, b"").unwrap();
+        atomic_write_if_matches(&path, b"back", b"").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"back");
+    }
+
+    #[test]
+    fn a_live_lock_is_kept_and_a_dead_one_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let lock = lock_path(&path);
+        let id = LockIdentity::current();
+        fs::write(
+            &lock,
+            format!("v1\n{}\n{}\n{}\n", id.host, id.pid, id.start),
+        )
+        .unwrap();
+        assert!(atomic_write(&path, b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+
+        fs::write(&lock, format!("v1\n{}\n{}\n1\n", local_host(), u32::MAX)).unwrap();
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert!(dir_has_no_subtext_temp(dir.path()));
+    }
+
+    #[test]
+    fn a_foreign_lock_waits_longer_than_a_slow_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, b"old").unwrap();
+        let lock = lock_path(&path);
+        fs::write(&lock, "v1\nother-machine\n1\n1\n").unwrap();
+        assert!(atomic_write(&path, b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+
+        let file = fs::File::options().write(true).open(&lock).unwrap();
+        file.set_modified(SystemTime::now() - LOCK_FOREIGN - Duration::from_secs(5))
+            .unwrap();
+        drop(file);
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 
     #[test]

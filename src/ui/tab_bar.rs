@@ -2,12 +2,11 @@
 //! Theme, font, and the other choices live in the settings window.
 
 use crate::editor::Tab;
-use crate::geom::BAR;
 use crate::message::Message;
 use crate::ui::TAB_STRIP;
 
 use iced::widget::{button, container, row, scrollable, text};
-use iced::{Border, Element, Length, Theme, alignment};
+use iced::{Border, Element, Font, Length, Theme, alignment};
 
 pub fn view<'a>(
     tabs: &'a [Tab],
@@ -15,15 +14,18 @@ pub fn view<'a>(
     columns: u32,
     rows: u32,
     line_numbers: bool,
+    font: Font,
+    size: f32,
+    bar: u32,
 ) -> Element<'a, Message> {
     let mut items: Vec<Element<'a, Message>> = Vec::with_capacity(tabs.len() + 4);
     for (index, tab) in tabs.iter().enumerate() {
-        items.push(tab_chip(&tab.title, index, index == active));
+        items.push(tab_chip(&tab.title, index, index == active, font, size));
     }
-    items.push(text_button("+", Message::NewTab));
-    items.push(text_button("Open", Message::Open));
-    items.push(text_button("Save", Message::Save));
-    items.push(text_button("Save as", Message::SaveAs));
+    items.push(text_button("+", Message::NewTab, font, size));
+    items.push(text_button("Open", Message::Open, font, size));
+    items.push(text_button("Save", Message::Save, font, size));
+    items.push(text_button("Save as", Message::SaveAs, font, size));
 
     let strip = scrollable(
         row(items)
@@ -48,15 +50,16 @@ pub fn view<'a>(
                 .map(|tab| tab.cursor_column.saturating_add(1))
                 .unwrap_or(1),
         ))
-        .size(14),
-        text(format!("{columns}×{rows}")).size(14),
-        line_button(line_numbers),
-        text_button("Settings", Message::ToggleSettings),
+        .font(font)
+        .size(size),
+        text(format!("{columns}×{rows}")).font(font).size(size),
+        line_button(line_numbers, font, size),
+        text_button("Settings", Message::ToggleSettings, font, size),
     ]
     .spacing(8)
     .padding([0, 8])
     .align_y(alignment::Vertical::Center)
-    .height(Length::Fixed(BAR as f32))
+    .height(Length::Fixed(bar as f32))
     .into()
 }
 
@@ -82,7 +85,13 @@ fn thin_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
 }
 
 /// Title and close control share one chip. The close control sits inside it.
-fn tab_chip(title: &str, index: usize, active: bool) -> Element<'_, Message> {
+fn tab_chip(
+    title: &str,
+    index: usize,
+    active: bool,
+    font: Font,
+    size: f32,
+) -> Element<'_, Message> {
     let chip = move |theme: &Theme| {
         let pair = if active {
             theme.extended_palette().primary.base
@@ -102,11 +111,11 @@ fn tab_chip(title: &str, index: usize, active: bool) -> Element<'_, Message> {
     };
     container(
         row![
-            button(text(title).size(14))
+            button(text(title).font(font).size(size))
                 .padding([2, 8])
                 .style(move |theme, status| tab_text(theme, status, active))
                 .on_press(Message::Select(index)),
-            button(text("×").size(14))
+            button(text("×").font(font).size(size))
                 .padding([2, 6])
                 .style(move |theme, status| tab_text(theme, status, active))
                 .on_press(Message::Close(index)),
@@ -135,17 +144,22 @@ fn tab_text(theme: &Theme, status: button::Status, active: bool) -> button::Styl
     style
 }
 
-fn line_button(on: bool) -> Element<'static, Message> {
+fn line_button(on: bool, font: Font, size: f32) -> Element<'static, Message> {
     let style = if on { button::primary } else { button::text };
-    button(text("Lines").size(14))
+    button(text("Lines").font(font).size(size))
         .padding([2, 8])
         .style(style)
         .on_press(Message::ToggleLineNumbers)
         .into()
 }
 
-fn text_button<'a>(label: &'static str, message: Message) -> Element<'a, Message> {
-    button(text(label).size(14))
+fn text_button<'a>(
+    label: &'static str,
+    message: Message,
+    font: Font,
+    size: f32,
+) -> Element<'a, Message> {
+    button(text(label).font(font).size(size))
         .padding([2, 8])
         .style(button::text)
         .on_press(message)

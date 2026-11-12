@@ -737,7 +737,11 @@ impl Tab {
             if !self.dirty && !explicit {
                 return Ok(());
             }
-            let result = if matches!(refresh, Refresh::Missing | Refresh::Gone) {
+            // A path that has never been on disk is created. A file that
+            // existed, including an empty one, is only replaced while its
+            // bytes still match. Deletion is `Missing` or `Gone`, not an
+            // empty match.
+            let result = if matches!(refresh, Refresh::Missing | Refresh::Gone) || !self.on_disk {
                 self.write_absent()
             } else {
                 self.write_if_matches()

@@ -163,6 +163,65 @@ impl std::fmt::Display for FontChoice {
     }
 }
 
+/// Face for the tab row, find bar, and settings. `MatchEditor` follows [`FontChoice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiFont {
+    #[default]
+    MatchEditor,
+    Face(FontChoice),
+}
+
+impl UiFont {
+    pub fn installed() -> &'static [Self] {
+        static CHOICES: std::sync::OnceLock<Vec<UiFont>> = std::sync::OnceLock::new();
+        CHOICES.get_or_init(|| {
+            let mut choices = Vec::new();
+            choices.push(Self::MatchEditor);
+            choices.extend(FontChoice::installed().iter().copied().map(Self::Face));
+            choices
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MatchEditor => "Match Editor",
+            Self::Face(face) => face.label(),
+        }
+    }
+
+    pub fn resolve(self, editor: FontChoice) -> Font {
+        match self {
+            Self::MatchEditor => editor.font(),
+            Self::Face(face) => face.font(),
+        }
+    }
+}
+
+impl std::fmt::Display for UiFont {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+impl Serialize for UiFont {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::MatchEditor => serializer.serialize_str("match"),
+            Self::Face(face) => face.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UiFont {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        if raw.eq_ignore_ascii_case("match") {
+            return Ok(Self::MatchEditor);
+        }
+        Ok(Self::Face(FontChoice::from_saved(&raw)))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeChoice {

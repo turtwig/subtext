@@ -144,6 +144,32 @@ pub fn clear_drawer() {
     });
 }
 
+/// Replace the drawer blur object even when the rectangle did not move.
+///
+/// KWin keeps the frost it copied until the object is replaced. A chrome
+/// change, such as the UI size, commits a new buffer without moving the
+/// plate, and the old frost stays wrong until something builds a new object.
+/// The redraw that follows publishes it. This does not commit the surface.
+pub fn refresh_drawer() {
+    HOST.with(|slot| {
+        let mut host = slot.borrow_mut();
+        let Some(host) = host.as_mut() else {
+            return;
+        };
+        prune(host);
+        if !host.enabled || host.drawer.is_none() {
+            return;
+        }
+        let count = host.live.len();
+        for index in 0..count {
+            if !host.live[index].whole {
+                host.live[index].applied = None;
+                apply(host, index, false);
+            }
+        }
+    });
+}
+
 /// Drawer rectangle in surface coordinates. Settings blurs its whole window.
 pub fn set_drawer(origin: (i32, i32), size: (u32, u32)) {
     let region = (origin.0, origin.1, size.0 as i32, size.1 as i32);

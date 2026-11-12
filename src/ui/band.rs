@@ -6,7 +6,7 @@
 //! editor out and that layout has published the snap.
 
 use crate::editor::wrap::{self, Viewport};
-use crate::geom::{self, Edge};
+use crate::geom;
 use crate::message::Message;
 use crate::ui::visible_line;
 use iced::advanced::layout::{self, Layout, Node};
@@ -33,9 +33,8 @@ pub struct Band<'a, Renderer> {
     row_height: f32,
     pad: f32,
     gutter: f32,
-    edge: Edge,
-    window_height: u32,
-    find_extra: u32,
+    /// Editor face. Line numbers stay with the buffer, not the UI face.
+    number_font: Font,
 }
 
 pub fn band<'a, Renderer>(
@@ -49,9 +48,7 @@ pub fn band<'a, Renderer>(
     row_height: f32,
     pad: f32,
     gutter: f32,
-    edge: Edge,
-    window_height: u32,
-    find_extra: u32,
+    number_font: Font,
 ) -> Band<'a, Renderer> {
     Band {
         editor: editor.into(),
@@ -64,9 +61,7 @@ pub fn band<'a, Renderer>(
         row_height,
         pad,
         gutter,
-        edge,
-        window_height,
-        find_extra,
+        number_font,
     }
 }
 
@@ -242,11 +237,13 @@ where
         );
         let scroll_w = geom::SCROLLBAR as f32;
         let gutter = self.gutter.min((bounds.width - scroll_w).max(0.0));
+        // The text fills the band, so the last line ends where the scrollbar does.
+        // `pad` stays in the gutter, beside the digits.
         let text_box = Rectangle {
             x: bounds.x,
-            y: bounds.y + self.pad,
+            y: bounds.y,
             width: (bounds.width - scroll_w).max(0.0),
-            height: (bounds.height - self.pad * 2.0).max(0.0),
+            height: bounds.height,
         };
         let highlight = caret_color(theme);
         for (index, slot) in view.slots.iter().enumerate() {
@@ -293,7 +290,7 @@ where
                         bounds: Size::new(number_w, pitch),
                         size: Pixels(size),
                         line_height: text::LineHeight::Absolute(Pixels(pitch)),
-                        font: Font::MONOSPACE,
+                        font: self.number_font,
                         align_x: text::Alignment::Right,
                         align_y: alignment_top(),
                         shaping: text::Shaping::Advanced,
@@ -325,12 +322,10 @@ where
             theme,
             scrollbar_bounds(bounds),
             &visible,
-            self.edge,
-            self.window_height,
-            self.find_extra,
-            self.rows,
+            pitch,
             view.total,
             view.scroll,
+            view.lead,
         );
     }
 
@@ -387,12 +382,10 @@ fn paint_scrollbar<Renderer>(
     theme: &iced::Theme,
     track: Rectangle,
     viewport: &Rectangle,
-    edge: Edge,
-    window_height: u32,
-    find_extra: u32,
-    rows: u32,
+    line_h: f32,
     total: u32,
     scroll: i32,
+    lead: f32,
 ) where
     Renderer: iced::advanced::Renderer,
 {
@@ -408,8 +401,7 @@ fn paint_scrollbar<Renderer>(
         },
         track_color,
     );
-    let (_top, track_h) = geom::editor_track(edge, window_height, find_extra);
-    let (thumb_h, offset) = geom::thumb_span(track_h, rows, total.max(1), scroll);
+    let (thumb_h, offset) = geom::thumb_span_px(track.height, line_h, total, scroll, lead);
     let thumb = Rectangle {
         x: track.x,
         y: track.y + offset,

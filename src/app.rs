@@ -6,7 +6,7 @@
 use crate::editor::{Tab, TabStop};
 use crate::geom::{self, Cell, Edge, FALLBACK_OUTPUT, default_rows, pixel_size};
 use crate::ipc::Command;
-use crate::look::{self, FontChoice, TextUnit, ThemeChoice};
+use crate::look::{self, FontChoice, TextUnit, ThemeChoice, UiFont};
 use crate::message::Message;
 use crate::state::{self, Paths, Snapshot};
 use crate::ui::Drawer;
@@ -82,6 +82,10 @@ pub struct App {
     text_size: f32,
     text_unit: TextUnit,
     font: FontChoice,
+    ui_font: UiFont,
+    ui_match_size: bool,
+    /// Painted resize edge, in pixels. The drag target is never thinner than [`geom::GRAB`].
+    border: u32,
     theme: ThemeChoice,
     line_numbers: bool,
     word_wrap: bool,
@@ -209,8 +213,25 @@ impl App {
                 self.persist();
                 Task::none()
             }
+            Message::FontUi(font) => {
+                if font == self.ui_font {
+                    return Task::none();
+                }
+                self.ui_font = font;
+                self.persist();
+                Task::none()
+            }
             Message::FontSmaller => self.set_text_size(self.text_size - 1.0),
             Message::FontLarger => self.set_text_size(self.text_size + 1.0),
+            Message::ToggleUiSize => {
+                self.ui_match_size = !self.ui_match_size;
+                self.sync_cells();
+                self.persist();
+                self.refrost();
+                Task::none()
+            }
+            Message::BorderSmaller => self.set_border(self.border.saturating_sub(1)),
+            Message::BorderLarger => self.set_border(self.border.saturating_add(1)),
             Message::SetTextUnit(unit) => self.set_text_unit(unit),
             Message::SetEdge(edge) => self.set_edge(edge),
             Message::ToggleLineNumbers => self.toggle_line_numbers(),
@@ -226,6 +247,7 @@ impl App {
                 self.compact = !self.compact;
                 self.reclamp();
                 self.persist();
+                self.refrost();
                 Task::none()
             }
             Message::TabStop(tab_stop) => {
@@ -414,8 +436,11 @@ impl App {
             return crate::ui::settings::view(crate::ui::settings::Model {
                 theme: self.theme,
                 font: self.font,
+                ui_font: self.ui_font,
                 text_size: self.text_size,
                 text_unit: self.text_unit,
+                ui_match_size: self.ui_match_size,
+                border: self.border,
                 word_wrap: self.word_wrap,
                 compact: self.compact,
                 tab_stop: self.tab_stop,
@@ -450,11 +475,15 @@ impl App {
             edge: self.edge,
             columns: self.columns,
             rows: self.rows_on_screen(),
-            height: self.height,
             pad: geom::editor_pad(self.compact),
             gutter: self.gutter(),
             text_size: self.text_pixels(),
             font: self.font.font(),
+            ui_font: self.ui_font.resolve(self.font),
+            ui_size: self.ui_pixels(),
+            border: self.border,
+            bar: self.bar_px(),
+            find_bar: self.find_height(),
             syntax: self.theme.syntax(),
             line_numbers: self.line_numbers,
             word_wrap: self.word_wrap,
@@ -520,7 +549,7 @@ impl App {
             app.edge,
             FALLBACK_OUTPUT.1,
             app.cell(),
-            geom::editor_pad(false),
+            geom::Frame::at(geom::editor_pad(false)),
         );
         app.ensure_pixels();
         app.tabs.push(Tab::new_scratch(&app.paths.scratch, 1));
@@ -555,6 +584,9 @@ impl App {
             text_size: geom::TEXT_SIZE,
             text_unit: TextUnit::Pt,
             font: FontChoice::SYSTEM,
+            ui_font: UiFont::MatchEditor,
+            ui_match_size: false,
+            border: 1,
             theme: ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,
@@ -594,6 +626,9 @@ impl App {
         app.text_unit = snapshot.text_unit;
         app.text_size = look::clamp_text_size(snapshot.text_size, snapshot.text_unit);
         app.font = snapshot.font;
+        app.ui_font = snapshot.ui_font;
+        app.ui_match_size = snapshot.ui_match_size;
+        app.border = geom::clamp_border(snapshot.border);
         app.theme = snapshot.theme;
         app.line_numbers = snapshot.line_numbers;
         app.word_wrap = snapshot.word_wrap;
@@ -771,14 +806,18 @@ impl App {
         if !self.find_open {
             return self.rows.max(1);
         }
-        let inner = self.height.saturating_sub(
-            geom::vertical_chrome(self.edge, geom::editor_pad(self.compact)) + geom::FIND_BAR,
-        );
+        let inner = self
+            .height
+            .saturating_sub(geom::vertical_chrome(self.edge, self.frame()) + self.find_height());
         (inner / self.cell().height.max(1)).max(1)
     }
 
     fn find_extra(&self) -> u32 {
-        if self.find_open { geom::FIND_BAR } else { 0 }
+        if self.find_open {
+            self.find_height()
+        } else {
+            0
+        }
     }
 
     fn focus_editor(&mut self) -> Task<Message> {
@@ -1174,6 +1213,48 @@ impl App {
         self.text_unit.to_pixels(self.text_size)
     }
 
+    fn ui_pixels(&self) -> f32 {
+        if self.ui_match_size {
+            self.text_pixels()
+        } else {
+            14.0
+        }
+    }
+
+    /// Pixels the content sits in from a free edge. The drag target is wider
+    /// than this when the border is under [`geom::GRAB`].
+    fn grip(&self) -> u32 {
+        geom::clamp_border(self.border)
+    }
+
+    fn bar_px(&self) -> u32 {
+        geom::ui_row(self.ui_pixels())
+    }
+
+    fn find_height(&self) -> u32 {
+        geom::find_row(self.ui_pixels())
+    }
+
+    fn frame(&self) -> geom::Frame {
+        geom::Frame {
+            pad: geom::editor_pad(self.compact),
+            grip: self.grip(),
+            bar: self.bar_px(),
+        }
+    }
+
+    fn set_border(&mut self, px: u32) -> Task<Message> {
+        let px = geom::clamp_border(px);
+        if px == self.border {
+            return Task::none();
+        }
+        self.border = px;
+        self.sync_cells();
+        self.persist();
+        self.refrost();
+        Task::none()
+    }
+
     fn set_text_size(&mut self, size: f32) -> Task<Message> {
         let size = look::clamp_text_size(size, self.text_unit);
         if (size - self.text_size).abs() < f32::EPSILON {
@@ -1182,6 +1263,7 @@ impl App {
         self.text_size = size;
         self.sync_cells();
         self.persist();
+        self.refrost();
         Task::none()
     }
 
@@ -1304,11 +1386,12 @@ impl App {
         {
             return false;
         }
-        let bar = geom::BAR as f32;
-        let handle = geom::HANDLE as f32;
+        let bar = self.bar_px() as f32;
+        let grip = self.grip() as f32;
         match self.edge {
             Edge::Bottom => point.y >= self.height as f32 - bar,
-            Edge::Top | Edge::Left | Edge::Right => point.y >= handle && point.y <= handle + bar,
+            Edge::Top => point.y <= bar,
+            Edge::Left | Edge::Right => point.y >= grip && point.y <= grip + bar,
         }
     }
 
@@ -1340,17 +1423,24 @@ impl App {
             return Task::none();
         };
         let point = self.drawer_local(point);
-        let (top, track_h) = geom::editor_track(self.edge, self.height, self.find_extra());
+        let (top, track_h) = geom::editor_track(
+            self.edge,
+            self.height,
+            self.find_extra(),
+            self.grip(),
+            self.bar_px(),
+        );
         let rows = self.rows_on_screen();
-        let (line_count, scroll) = self
+        let line_h = self.cell().height as f32;
+        let (line_count, scroll, lead) = self
             .tabs
             .get(self.active)
             .map(|tab| {
                 let view = tab.viewport(rows);
-                (view.total, view.scroll)
+                (view.total, view.scroll, view.lead)
             })
-            .unwrap_or((1, 0));
-        let (thumb_h, offset) = geom::thumb_span(track_h, rows, line_count, scroll);
+            .unwrap_or((1, 0, 0.0));
+        let (thumb_h, offset) = geom::thumb_span_px(track_h, line_h, line_count, scroll, lead);
         let local = point.y - top;
         let grab = if local >= offset && local <= offset + thumb_h {
             local - offset
@@ -1366,14 +1456,21 @@ impl App {
             return Task::none();
         };
         let point = self.drawer_local(point);
-        let (top, track_h) = geom::editor_track(self.edge, self.height, self.find_extra());
+        let (top, track_h) = geom::editor_track(
+            self.edge,
+            self.height,
+            self.find_extra(),
+            self.grip(),
+            self.bar_px(),
+        );
         let rows = self.rows_on_screen();
+        let line_h = self.cell().height as f32;
         let line_count = self
             .tabs
             .get(self.active)
             .map(|tab| tab.viewport(rows).total)
             .unwrap_or(1);
-        let (thumb_h, _) = geom::thumb_span(track_h, rows, line_count, 0);
+        let (thumb_h, _) = geom::thumb_span_px(track_h, line_h, line_count, 0, 0.0);
         let max_scroll = line_count.saturating_sub(rows) as i32;
         let line = geom::scroll_line(point.y - top, grab, track_h, thumb_h, max_scroll);
         self.scroll_active_to(line);
@@ -1580,7 +1677,7 @@ impl App {
                 self.rows,
                 self.cell(),
                 self.gutter(),
-                geom::editor_pad(self.compact),
+                self.frame(),
             );
             if self.width == 0 {
                 self.width = width;
@@ -1604,13 +1701,12 @@ impl App {
 
     fn sync_cells(&mut self) {
         let cell = self.cell();
-        let pad = geom::editor_pad(self.compact);
         let inner_w = self
             .width
-            .saturating_sub(geom::horizontal_chrome(self.edge, pad) + self.gutter());
+            .saturating_sub(geom::horizontal_chrome(self.edge, self.frame()) + self.gutter());
         let inner_h = self
             .height
-            .saturating_sub(geom::vertical_chrome(self.edge, pad));
+            .saturating_sub(geom::vertical_chrome(self.edge, self.frame()));
         self.columns = (inner_w / cell.width.max(1)).max(1);
         self.rows = (inner_h / cell.height.max(1)).max(1);
     }
@@ -1635,7 +1731,7 @@ impl App {
             geom::MIN_ROWS,
             self.cell(),
             self.gutter(),
-            geom::editor_pad(self.compact),
+            self.frame(),
         )
     }
 
@@ -1646,7 +1742,7 @@ impl App {
             self.rows,
             self.cell(),
             self.gutter(),
-            geom::editor_pad(self.compact),
+            self.frame(),
         )
         .0;
         let restore = if self.width_restore < self.min_pixels().0 {
@@ -1832,7 +1928,7 @@ impl App {
                     self.rows.max(geom::MIN_ROWS),
                     self.cell(),
                     self.gutter(),
-                    geom::editor_pad(self.compact),
+                    self.frame(),
                 );
                 self.width = width;
                 self.height = height;
@@ -1849,14 +1945,8 @@ impl App {
                 self.span_width = self.across_span;
             }
         } else if self.side_width == 0 || self.side_height == 0 {
-            let (width, height) = pixel_size(
-                Edge::Left,
-                64,
-                28,
-                self.cell(),
-                self.gutter(),
-                geom::editor_pad(self.compact),
-            );
+            let (width, height) =
+                pixel_size(Edge::Left, 64, 28, self.cell(), self.gutter(), self.frame());
             self.width = width;
             self.height = height;
             self.width_restore = width;
@@ -1871,6 +1961,13 @@ impl App {
     /// Keep the frost on the part of the plate that is still on the output.
     /// Once that part is gone, drop the region. Leaving the previous rectangle
     /// up shows frost the drawer no longer covers.
+    /// Publish the plate rectangle again. Chrome changes do not move it, and
+    /// KWin will not notice a new buffer until the blur object is replaced.
+    fn refrost(&self) {
+        self.sync_blur();
+        crate::blur::refresh_drawer();
+    }
+
     fn sync_blur(&self) {
         if !self.blur || !self.drawer_painted() {
             return;
@@ -1956,6 +2053,9 @@ impl App {
             text_size: self.text_size,
             text_unit: self.text_unit,
             font: self.font,
+            ui_font: self.ui_font,
+            ui_match_size: self.ui_match_size,
+            border: self.border,
             theme: self.theme,
             line_numbers: self.line_numbers,
             word_wrap: self.word_wrap,
@@ -2266,6 +2366,9 @@ mod tests {
             text_size: 16.0,
             text_unit: TextUnit::Pt,
             font: crate::look::FontChoice::SYSTEM,
+            ui_font: UiFont::MatchEditor,
+            ui_match_size: false,
+            border: 1,
             theme: crate::look::ThemeChoice::Dracula,
             line_numbers: true,
             word_wrap: false,

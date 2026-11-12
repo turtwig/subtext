@@ -1,5 +1,5 @@
-//! Drawer layout. Resize grips are hairlines. The editor padding sits inside
-//! the character grid's chrome so text is not flush with the frame.
+//! Drawer layout. Resize edges are a solid bar of the saved thickness. The
+//! editor padding sits inside that bar so text is not flush with the frame.
 
 mod band;
 mod place;
@@ -27,13 +27,20 @@ pub struct Drawer<'a> {
     pub edge: Edge,
     pub columns: u32,
     pub rows: u32,
-    pub height: u32,
     /// Padding around the glyphs, from the saved layout choice.
     pub pad: u32,
     /// Pre-computed gutter width (0 when line numbers are off).
     pub gutter: u32,
     pub text_size: f32,
     pub font: Font,
+    /// Tab row, find bar, and confirmation. Separate from the editor face.
+    pub ui_font: Font,
+    pub ui_size: f32,
+    /// Painted thickness. Zero leaves the edge invisible. The drag target
+    /// stays at least a few pixels and overlaps the content.
+    pub border: u32,
+    pub bar: u32,
+    pub find_bar: u32,
     pub syntax: highlighter::Theme,
     pub line_numbers: bool,
     pub word_wrap: bool,
@@ -66,7 +73,12 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .line_height(iced_core::text::LineHeight::Absolute(Pixels(
             cell.height as f32,
         )))
-        .padding(drawer.pad as f32)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: drawer.pad as f32,
+            bottom: 0.0,
+            left: drawer.pad as f32,
+        })
         .wrapping(wrapping)
         .height(Length::Fill)
         .style(editor_style)
@@ -79,7 +91,6 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-    let find_extra = if drawer.find_open { geom::FIND_BAR } else { 0 };
     let editor_row: Element<'a, Message> = band::band(
         editor,
         tab.snap_key(),
@@ -95,9 +106,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         } else {
             0.0
         },
-        drawer.edge,
-        drawer.height,
-        find_extra,
+        drawer.font,
     )
     .into();
     let bar = tab_bar::view(
@@ -106,11 +115,22 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         drawer.columns,
         drawer.rows,
         drawer.line_numbers,
+        drawer.ui_font,
+        drawer.ui_size,
+        drawer.bar,
     );
-    let confirm = drawer.confirm_close.map(confirm_close);
-    let find = drawer
-        .find_open
-        .then(|| find_bar(drawer.find_query, find_count(tab, drawer.find_query)));
+    let confirm = drawer
+        .confirm_close
+        .map(|title| confirm_close(title, drawer.ui_font, drawer.ui_size));
+    let find = drawer.find_open.then(|| {
+        find_bar(
+            drawer.find_query,
+            find_count(tab, drawer.find_query),
+            drawer.ui_font,
+            drawer.ui_size,
+            drawer.find_bar,
+        )
+    });
     let body = match drawer.edge {
         Edge::Bottom => {
             let mut parts = vec![editor_row];
@@ -135,36 +155,7 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
             column(parts).into()
         }
     };
-    match drawer.edge {
-        Edge::Bottom => column([
-            resize::horizontal(-1),
-            row([resize::vertical(-1), body, resize::vertical(1)])
-                .height(Length::Fill)
-                .into(),
-        ])
-        .into(),
-        Edge::Top => column([
-            row([resize::vertical(-1), body, resize::vertical(1)])
-                .height(Length::Fill)
-                .into(),
-            resize::horizontal(1),
-        ])
-        .into(),
-        Edge::Left => column([
-            resize::horizontal(-1),
-            row([body, resize::vertical(1)]).height(Length::Fill).into(),
-            resize::horizontal(1),
-        ])
-        .into(),
-        Edge::Right => column([
-            resize::horizontal(-1),
-            row([resize::vertical(-1), body])
-                .height(Length::Fill)
-                .into(),
-            resize::horizontal(1),
-        ])
-        .into(),
-    }
+    resize::frame(drawer.edge, drawer.border, body)
 }
 
 /// Pins the drawer inside the output-sized surface.
@@ -209,7 +200,13 @@ fn find_count(tab: &Tab, query: &str) -> String {
     crate::editor::find::readout(&tab.text(), query, caret, anchor).unwrap_or_default()
 }
 
-fn find_bar<'a>(query: &'a str, count: String) -> Element<'a, Message> {
+fn find_bar<'a>(
+    query: &'a str,
+    count: String,
+    font: Font,
+    size: f32,
+    height: u32,
+) -> Element<'a, Message> {
     container(
         row![
             text_input("Find", query)
@@ -217,42 +214,49 @@ fn find_bar<'a>(query: &'a str, count: String) -> Element<'a, Message> {
                 .on_input(Message::FindQuery)
                 .on_submit(Message::FindSubmit)
                 .padding([2, 8])
-                .size(14.0)
+                .font(font)
+                .size(size)
                 .width(Length::Fill),
-            text(count).size(14).width(Length::Fixed(56.0)),
-            find_button("Previous", Message::FindPrevious),
-            find_button("Next", Message::FindNext),
-            find_button("Close", Message::FindClose),
+            text(count).font(font).size(size).width(Length::Fixed(56.0)),
+            find_button("Previous", Message::FindPrevious, font, size),
+            find_button("Next", Message::FindNext, font, size),
+            find_button("Close", Message::FindClose, font, size),
         ]
         .spacing(8)
         .align_y(alignment::Vertical::Center),
     )
     .padding([0, 8])
-    .height(Length::Fixed(geom::FIND_BAR as f32))
+    .height(Length::Fixed(height as f32))
     .align_y(alignment::Vertical::Center)
     .into()
 }
 
-fn find_button(label: &'static str, message: Message) -> Element<'static, Message> {
-    button(text(label).size(14))
+fn find_button(
+    label: &'static str,
+    message: Message,
+    font: Font,
+    size: f32,
+) -> Element<'static, Message> {
+    button(text(label).font(font).size(size))
         .padding([2, 8])
         .style(button::text)
         .on_press(message)
         .into()
 }
 
-fn confirm_close(title: &str) -> Element<'_, Message> {
+fn confirm_close(title: &str, font: Font, size: f32) -> Element<'_, Message> {
     use iced::widget::{button, row};
     container(
         row![
             text(format!("Close {title}? This scratch note will be deleted."))
-                .size(14)
+                .font(font)
+                .size(size)
                 .width(Length::Fill),
-            button(text("Delete").size(14))
+            button(text("Delete").font(font).size(size))
                 .padding([4, 10])
                 .style(button::danger)
                 .on_press(Message::ConfirmClose),
-            button(text("Keep").size(14))
+            button(text("Keep").font(font).size(size))
                 .padding([4, 10])
                 .style(button::text)
                 .on_press(Message::CancelClose),

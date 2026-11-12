@@ -16,15 +16,19 @@ pub const CELL_W: u32 = 10;
 /// Whole-pixel height of one row.
 pub const CELL_H: u32 = 22;
 
-/// Hit target for a resize edge. Drawn as a hairline so it does not read as a frame.
-pub const HANDLE: u32 = 4;
+/// Pointer target on a resize edge. The painted border can be thinner than
+/// this, including zero, and the edge can still be dragged.
+pub const GRAB: u32 = 4;
+/// Thickest border the settings stepper will store.
+pub const BORDER_MAX: u32 = 24;
 /// Shared tab and status row.
 pub const BAR: u32 = 40;
 /// Find bar between the editor and the tab row.
 pub const FIND_BAR: u32 = 36;
-/// Padding inside the editor, around the glyphs.
+/// Padding on either side of the glyphs. The text runs from the top of the
+/// frame to the bottom of the scrollbar.
 pub const EDITOR_PAD: u32 = 16;
-/// Padding when the compact layout is on.
+/// Side padding when the compact layout is on.
 pub const COMPACT_PAD: u32 = 8;
 /// Vertical scrollbar reserved beside the editor.
 pub const SCROLLBAR: u32 = 12;
@@ -95,13 +99,62 @@ impl Cell {
     }
 }
 
-/// Pixels outside the character grid on the horizontal axis.
-pub fn horizontal_chrome(edge: Edge, pad: u32) -> u32 {
-    let handles = match edge {
-        Edge::Top | Edge::Bottom => HANDLE * 2,
-        Edge::Left | Edge::Right => HANDLE,
+/// Pad, grip depth, and tab-row height that sit outside the character grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    pub pad: u32,
+    pub grip: u32,
+    pub bar: u32,
+}
+
+impl Frame {
+    /// The grip and tab row from before the border had its own thickness.
+    pub fn at(pad: u32) -> Self {
+        Self {
+            pad,
+            grip: GRAB,
+            bar: BAR,
+        }
+    }
+}
+
+/// Drag depth of one edge. The layout inset is the border itself, so a thinner
+/// border lets the content reach the bar. The extra pixels overlap the content.
+pub fn grip_span(border: u32) -> u32 {
+    border.min(BORDER_MAX).max(GRAB)
+}
+
+pub fn clamp_border(px: u32) -> u32 {
+    px.min(BORDER_MAX)
+}
+
+/// Tab row tall enough for `size` px text. 14px stays at [`BAR`].
+pub fn ui_row(size: f32) -> u32 {
+    let needed = if size.is_finite() && size > 0.0 {
+        (size + 24.0).ceil() as u32
+    } else {
+        BAR
     };
-    handles + pad * 2 + SCROLLBAR
+    needed.max(BAR)
+}
+
+/// Find row tall enough for `size` px text. 14px stays at [`FIND_BAR`].
+pub fn find_row(size: f32) -> u32 {
+    let needed = if size.is_finite() && size > 0.0 {
+        (size + 16.0).ceil() as u32
+    } else {
+        FIND_BAR
+    };
+    needed.max(FIND_BAR)
+}
+
+/// Pixels outside the character grid on the horizontal axis.
+pub fn horizontal_chrome(edge: Edge, frame: Frame) -> u32 {
+    let handles = match edge {
+        Edge::Top | Edge::Bottom => frame.grip * 2,
+        Edge::Left | Edge::Right => frame.grip,
+    };
+    handles + frame.pad * 2 + SCROLLBAR
 }
 
 /// Fixed gutter: digit-width columns for `digits`, plus the gap before the text.
@@ -110,10 +163,12 @@ pub fn gutter_width(cell: Cell, digits: u32, pad: u32) -> u32 {
 }
 
 /// Pixels outside the character grid on the vertical axis.
-pub fn vertical_chrome(edge: Edge, pad: u32) -> u32 {
+///
+/// The text fills the editor from top to bottom. Side insets are not included.
+pub fn vertical_chrome(edge: Edge, frame: Frame) -> u32 {
     match edge {
-        Edge::Top | Edge::Bottom => HANDLE + BAR + pad * 2,
-        Edge::Left | Edge::Right => HANDLE * 2 + BAR + pad * 2,
+        Edge::Top | Edge::Bottom => frame.grip + frame.bar,
+        Edge::Left | Edge::Right => frame.grip * 2 + frame.bar,
     }
 }
 
@@ -123,21 +178,21 @@ pub fn pixel_size(
     rows: u32,
     cell: Cell,
     gutter: u32,
-    pad: u32,
+    frame: Frame,
 ) -> (u32, u32) {
     (
-        horizontal_chrome(edge, pad) + gutter + columns * cell.width,
-        vertical_chrome(edge, pad) + rows * cell.height,
+        horizontal_chrome(edge, frame) + gutter + columns * cell.width,
+        vertical_chrome(edge, frame) + rows * cell.height,
     )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn max_columns(edge: Edge, output_width: u32, cell: Cell, gutter: u32, pad: u32) -> u32 {
-    output_width.saturating_sub(horizontal_chrome(edge, pad) + gutter) / cell.width.max(1)
+pub fn max_columns(edge: Edge, output_width: u32, cell: Cell, gutter: u32, frame: Frame) -> u32 {
+    output_width.saturating_sub(horizontal_chrome(edge, frame) + gutter) / cell.width.max(1)
 }
 
-pub fn max_rows(edge: Edge, output_height: u32, cell: Cell, pad: u32) -> u32 {
-    output_height.saturating_sub(vertical_chrome(edge, pad)) / cell.height.max(1)
+pub fn max_rows(edge: Edge, output_height: u32, cell: Cell, frame: Frame) -> u32 {
+    output_height.saturating_sub(vertical_chrome(edge, frame)) / cell.height.max(1)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -147,32 +202,32 @@ pub fn clamp_columns(
     output_width: u32,
     cell: Cell,
     gutter: u32,
-    pad: u32,
+    frame: Frame,
 ) -> u32 {
-    let max = max_columns(edge, output_width, cell, gutter, pad).max(MIN_COLS);
+    let max = max_columns(edge, output_width, cell, gutter, frame).max(MIN_COLS);
     columns.clamp(MIN_COLS, max)
 }
 
-pub fn clamp_rows(edge: Edge, rows: u32, output_height: u32, cell: Cell, pad: u32) -> u32 {
-    let max = max_rows(edge, output_height, cell, pad).max(MIN_ROWS);
+pub fn clamp_rows(edge: Edge, rows: u32, output_height: u32, cell: Cell, frame: Frame) -> u32 {
+    let max = max_rows(edge, output_height, cell, frame).max(MIN_ROWS);
     rows.clamp(MIN_ROWS, max)
 }
 
 /// Default row count: 40% of the output, rounded down to a whole row.
-pub fn default_rows(edge: Edge, output_height: u32, cell: Cell, pad: u32) -> u32 {
+pub fn default_rows(edge: Edge, output_height: u32, cell: Cell, frame: Frame) -> u32 {
     let target = output_height.saturating_mul(2) / 5;
-    let rows = target.saturating_sub(vertical_chrome(edge, pad)) / cell.height.max(1);
-    clamp_rows(edge, rows.max(MIN_ROWS), output_height, cell, pad)
+    let rows = target.saturating_sub(vertical_chrome(edge, frame)) / cell.height.max(1);
+    clamp_rows(edge, rows.max(MIN_ROWS), output_height, cell, frame)
 }
 
 /// Top of the editor band and its height, in window pixels.
 ///
 /// The scrollbar uses this same band, so a click lines up with the thumb.
-pub fn editor_track(edge: Edge, window_height: u32, extra: u32) -> (f32, f32) {
+pub fn editor_track(edge: Edge, window_height: u32, extra: u32, grip: u32, bar: u32) -> (f32, f32) {
     let (top, outside) = match edge {
-        Edge::Bottom => (HANDLE, HANDLE + BAR + extra),
-        Edge::Top => (BAR + extra, HANDLE + BAR + extra),
-        Edge::Left | Edge::Right => (HANDLE + BAR + extra, HANDLE * 2 + BAR + extra),
+        Edge::Bottom => (grip, grip + bar + extra),
+        Edge::Top => (bar + extra, grip + bar + extra),
+        Edge::Left | Edge::Right => (grip + bar + extra, grip * 2 + bar + extra),
     };
     (top as f32, window_height.saturating_sub(outside) as f32)
 }
@@ -194,23 +249,50 @@ pub fn preferred_size(memory: u32, current: u32, output: Option<u32>) -> u32 {
 }
 
 /// Thumb height and its offset from the top of the track.
+///
+/// `visible` rows are assumed to fill `track_h`, with no partial row.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn thumb_span(track_h: f32, visible: u32, total: u32, scroll: i32) -> (f32, f32) {
-    if track_h <= 1.0 {
+    let line_h = if visible == 0 {
+        1.0
+    } else {
+        track_h / visible.max(1) as f32
+    };
+    thumb_span_px(track_h, line_h, total, scroll, 0.0)
+}
+
+/// Thumb height and offset from the pixel scroll.
+///
+/// `lead` is where the first visible row sits. A negative lead means that row
+/// starts above the track, so the note is further down than the whole-row
+/// count. When the last line is flush with the bottom, the thumb is too.
+pub fn thumb_span_px(track_h: f32, line_h: f32, total: u32, scroll: i32, lead: f32) -> (f32, f32) {
+    if track_h <= 1.0 || !track_h.is_finite() {
         return (track_h.max(0.0), 0.0);
     }
-    let total = total.max(1);
-    let visible = visible.max(1).min(total);
+    let line_h = if line_h.is_finite() && line_h > 0.0 {
+        line_h
+    } else {
+        1.0
+    };
+    let content = total.max(1) as f32 * line_h;
+    let view = track_h.min(content);
     let thumb = if track_h <= 18.0 {
         track_h
     } else {
-        (track_h * visible as f32 / total as f32).clamp(18.0, track_h)
+        (track_h * view / content).clamp(18.0, track_h)
     };
-    let max_scroll = total.saturating_sub(visible) as f32;
+    let max_scroll = (content - view).max(0.0);
     let travel = (track_h - thumb).max(0.0);
+    let scrolled = if lead.is_finite() {
+        scroll.max(0) as f32 * line_h - lead
+    } else {
+        scroll.max(0) as f32 * line_h
+    };
     let offset = if max_scroll <= 0.0 {
         0.0
     } else {
-        travel * (scroll.max(0) as f32 / max_scroll)
+        travel * (scrolled / max_scroll).clamp(0.0, 1.0)
     };
     (thumb, offset.clamp(0.0, travel))
 }
@@ -437,19 +519,20 @@ mod tests {
     fn pixel_size_is_chrome_plus_whole_cells() {
         let cell = Cell::for_text_size(TEXT_SIZE);
         let pad = EDITOR_PAD;
-        let (w, h) = pixel_size(Edge::Bottom, 120, 10, cell, 0, pad);
-        assert_eq!(w, horizontal_chrome(Edge::Bottom, pad) + 120 * CELL_W);
-        assert_eq!(h, vertical_chrome(Edge::Bottom, pad) + 10 * CELL_H);
-        assert_eq!(w % 2, horizontal_chrome(Edge::Bottom, pad) % 2);
+        let frame = Frame::at(pad);
+        let (w, h) = pixel_size(Edge::Bottom, 120, 10, cell, 0, frame);
+        assert_eq!(w, horizontal_chrome(Edge::Bottom, frame) + 120 * CELL_W);
+        assert_eq!(h, vertical_chrome(Edge::Bottom, frame) + 10 * CELL_H);
+        assert_eq!(w % 2, horizontal_chrome(Edge::Bottom, frame) % 2);
     }
 
     #[test]
-    fn compact_padding_reclaims_room_from_every_side() {
+    fn compact_padding_reclaims_the_sides() {
         let cell = Cell::for_text_size(TEXT_SIZE);
-        let breezy = pixel_size(Edge::Bottom, 120, 10, cell, 0, editor_pad(false));
-        let compact = pixel_size(Edge::Bottom, 120, 10, cell, 0, editor_pad(true));
+        let breezy = pixel_size(Edge::Bottom, 120, 10, cell, 0, Frame::at(editor_pad(false)));
+        let compact = pixel_size(Edge::Bottom, 120, 10, cell, 0, Frame::at(editor_pad(true)));
         assert_eq!(breezy.0 - compact.0, (EDITOR_PAD - COMPACT_PAD) * 2);
-        assert_eq!(breezy.1 - compact.1, (EDITOR_PAD - COMPACT_PAD) * 2);
+        assert_eq!(breezy.1, compact.1);
         assert_eq!(
             gutter_width(cell, 1, editor_pad(true)),
             gutter_width(cell, 1, editor_pad(false)) - 8
@@ -466,29 +549,34 @@ mod tests {
         let edge = Edge::Bottom;
         let cell = Cell::for_text_size(TEXT_SIZE);
         let pad = EDITOR_PAD;
-        let output_w = horizontal_chrome(edge, pad) + 50 * CELL_W + 7;
-        assert_eq!(clamp_columns(edge, 120, output_w, cell, 0, pad), 50);
-        assert_eq!(clamp_columns(edge, 10, output_w, cell, 0, pad), MIN_COLS);
+        let frame = Frame::at(pad);
+        let output_w = horizontal_chrome(edge, frame) + 50 * CELL_W + 7;
+        assert_eq!(clamp_columns(edge, 120, output_w, cell, 0, frame), 50);
+        assert_eq!(clamp_columns(edge, 10, output_w, cell, 0, frame), MIN_COLS);
     }
 
     #[test]
     fn default_rows_are_about_forty_percent() {
         let cell = Cell::for_text_size(TEXT_SIZE);
         let pad = EDITOR_PAD;
-        let rows = default_rows(Edge::Bottom, 1080, cell, pad);
-        let pixels = pixel_size(Edge::Bottom, DEFAULT_COLS, rows, cell, 0, pad).1;
+        let frame = Frame::at(pad);
+        let rows = default_rows(Edge::Bottom, 1080, cell, frame);
+        let pixels = pixel_size(Edge::Bottom, DEFAULT_COLS, rows, cell, 0, frame).1;
         assert!(pixels <= 1080 * 2 / 5 + CELL_H);
         assert!(rows >= MIN_ROWS);
     }
 
     #[test]
     fn editor_track_sits_under_the_top_grip() {
-        let (top, height) = editor_track(Edge::Bottom, 400, 0);
-        assert_eq!(top, HANDLE as f32);
-        assert_eq!(height, (400 - HANDLE - BAR) as f32);
-        let (top, height) = editor_track(Edge::Top, 400, FIND_BAR);
+        let (top, height) = editor_track(Edge::Bottom, 400, 0, GRAB, BAR);
+        assert_eq!(top, GRAB as f32);
+        assert_eq!(height, (400 - GRAB - BAR) as f32);
+        let (top, height) = editor_track(Edge::Top, 400, FIND_BAR, GRAB, BAR);
         assert_eq!(top, (BAR + FIND_BAR) as f32);
-        assert_eq!(height, (400 - HANDLE - BAR - FIND_BAR) as f32);
+        assert_eq!(height, (400 - GRAB - BAR - FIND_BAR) as f32);
+        assert_eq!(grip_span(0), GRAB);
+        assert_eq!(grip_span(8), 8);
+        assert_eq!(grip_span(100), BORDER_MAX);
     }
 
     #[test]
@@ -499,6 +587,14 @@ mod tests {
         let (thumb, offset) = thumb_span(200.0, 10, 40, 30);
         assert!((thumb - 50.0).abs() < 0.1);
         assert!((offset - 150.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn a_partial_last_row_puts_the_thumb_on_the_bottom() {
+        let line_h = 20.0;
+        let track = 210.0;
+        let (thumb, offset) = thumb_span_px(track, line_h, 40, 29, -10.0);
+        assert!((offset + thumb - track).abs() < 0.1);
     }
 
     #[test]

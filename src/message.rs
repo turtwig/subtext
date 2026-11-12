@@ -19,7 +19,7 @@ pub fn open_layer(settings: NewLayerShellSettings) -> (window::Id, iced::Task<Me
 }
 
 /// Client size of the settings window. The rows fit; it does not scroll.
-pub const SETTINGS_SIZE: (u32, u32) = (480, 722);
+pub const SETTINGS_SIZE: (u32, u32) = (480, 880);
 
 /// Opens the settings window on the overlay layer, centered on the output.
 ///
@@ -65,8 +65,13 @@ pub enum Message {
     Language(Language),
     Theme(ThemeChoice),
     Font(FontChoice),
+    FontUi(crate::look::UiFont),
     FontSmaller,
     FontLarger,
+    /// UI text uses the editor's pixel size.
+    ToggleUiSize,
+    BorderSmaller,
+    BorderLarger,
     SetTextUnit(crate::look::TextUnit),
     SetEdge(Edge),
     ToggleLineNumbers,
