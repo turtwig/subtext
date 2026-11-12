@@ -136,7 +136,12 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.note_editor_scroll();
-        self.dispatch(message)
+        let gutter = self.gutter();
+        let task = self.dispatch(message);
+        if self.gutter() != gutter {
+            self.reclamp();
+        }
+        task
     }
 
     fn dispatch(&mut self, message: Message) -> Task<Message> {
@@ -388,7 +393,7 @@ impl App {
                         return self.open_surface();
                     }
                     self.open_when_mapped = false;
-                    self.persist();
+                    self.persist_documents();
                     return self.close_settings();
                 }
                 Task::none()
@@ -817,7 +822,7 @@ impl App {
         } else {
             Task::none()
         };
-        self.persist();
+        self.persist_documents();
         let slide = if self.slide <= 0.0 && self.motion.is_none() {
             self.park()
         } else {
@@ -969,14 +974,16 @@ impl App {
             return Task::none();
         }
         let mut tab = self.tabs.remove(index);
-        if tab.file_path.is_some() {
+        if tab.file_path.is_some() && !tab.unreadable() {
             if let Err(error) = tab.write_buffer() {
                 eprintln!("subtext: save {}: {error}", tab.location_label());
                 self.tabs.insert(index, tab);
                 return Task::none();
             }
-        } else if let Some(path) = tab.scratch_path.take() {
-            let _ = std::fs::remove_file(path);
+        } else if tab.file_path.is_none() && !tab.unreadable() {
+            if let Some(path) = tab.scratch_path.take() {
+                let _ = std::fs::remove_file(path);
+            }
         }
         if self.pending_close == Some(index) {
             self.pending_close = None;
@@ -1004,6 +1011,11 @@ impl App {
             .and_then(|tab| tab.file_path.as_ref())
             .is_some();
         if has_file {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Err(error) = tab.write_buffer() {
+                    eprintln!("subtext: save {}: {error}", tab.location_label());
+                }
+            }
             self.persist();
             Task::none()
         } else {
@@ -1066,6 +1078,10 @@ impl App {
             let Some(tab) = self.tabs.get_mut(self.active) else {
                 return restore;
             };
+            if let Err(error) = tab.write_to(&path) {
+                eprintln!("subtext: save {}: {error}", path.display());
+                return restore;
+            }
             if let Some(scratch) = tab.scratch_path.take() {
                 let _ = std::fs::remove_file(scratch);
             }
@@ -1075,7 +1091,7 @@ impl App {
                 .unwrap_or_else(|| path.display().to_string());
             tab.language = crate::editor::Language::from_path(&path);
             tab.file_path = Some(path);
-            tab.dirty = true;
+            tab.dirty = false;
         }
         self.ensure_scratch();
         self.persist();
@@ -1529,13 +1545,12 @@ impl App {
         if !self.line_numbers {
             return 0;
         }
-        let digits = if self.compact {
-            let lines = self.tabs.get(self.active).map_or(1, |tab| tab.line_count());
-            (lines.to_string().len() as u32).max(2)
-        } else {
-            4
-        };
-        geom::gutter_width(self.cell(), digits, geom::editor_pad(self.compact))
+        let lines = self.tabs.get(self.active).map_or(1, |tab| tab.line_count());
+        geom::gutter_width(
+            self.cell(),
+            gutter_digits(lines, self.compact),
+            geom::editor_pad(self.compact),
+        )
     }
 
     fn ensure_pixels(&mut self) {
@@ -1874,10 +1889,29 @@ impl App {
         }
     }
 
+    /// Settings, tab choice, and cursor. Dirty scratch buffers are written too,
+    /// so a restart can restore them. Open files are left alone.
     fn persist(&mut self) {
+        self.store(false);
+    }
+
+    /// `persist`, and also write dirty files. Used when the drawer hides or
+    /// the surface closes, so dismissing it does not drop unsaved edits.
+    fn persist_documents(&mut self) {
+        self.store(true);
+    }
+
+    fn store(&mut self, files: bool) {
         self.note_editor_scroll();
         self.remember_active();
         for tab in &mut self.tabs {
+            let is_file = tab.file_path.is_some();
+            if is_file && !files {
+                continue;
+            }
+            if !tab.dirty {
+                continue;
+            }
             if let Err(error) = tab.write_buffer() {
                 eprintln!("subtext: save {}: {error}", tab.location_label());
             }
@@ -2165,6 +2199,17 @@ pub fn run() -> iced_layershell::Result {
         .run()
 }
 
+/// Digits the gutter reserves. Compact shrinks to the line count, with a floor
+/// of two. The ordinary gutter stays four wide until the file needs more.
+fn gutter_digits(lines: u32, compact: bool) -> u32 {
+    let digits = lines.max(1).to_string().len() as u32;
+    if compact {
+        digits.max(2)
+    } else {
+        digits.max(4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2230,5 +2275,126 @@ mod tests {
                 .any(|tab| tab.file_path.is_none() && tab.scratch_path.is_some())
         );
         assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn persisting_state_does_not_rewrite_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let mut app = App::from_snapshot(paths, file_only(file.clone()));
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text("changed");
+        app.tabs[0].dirty = true;
+        app.opacity = 0.5;
+        app.persist();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+        let _ = app.save();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "changed");
+    }
+
+    #[test]
+    fn persisting_state_writes_a_dirty_scratch_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        let scratch = paths.scratch.join("scratch_1.txt");
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        std::fs::write(&scratch, "old").unwrap();
+        let mut snapshot = file_only(dir.path().join("missing.txt"));
+        snapshot.tabs[0].file_path = None;
+        snapshot.tabs[0].scratch_path = Some(scratch.clone());
+        snapshot.tabs[0].title = "Scratch 1".into();
+        let mut app = App::from_snapshot(paths, snapshot);
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text("kept");
+        app.tabs[0].dirty = true;
+        app.persist();
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "kept");
+        std::fs::write(&scratch, "tampered").unwrap();
+        app.persist();
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "tampered");
+    }
+
+    #[test]
+    fn hiding_writes_a_dirty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let mut app = App::from_snapshot(paths, file_only(file.clone()));
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text("saved");
+        app.tabs[0].dirty = true;
+        app.persist_documents();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "saved");
+    }
+
+    #[test]
+    fn save_as_keeps_the_scratch_when_the_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        let scratch = paths.scratch.join("scratch_1.txt");
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        std::fs::write(&scratch, "keep me").unwrap();
+        let mut snapshot = file_only(dir.path().join("unused.txt"));
+        snapshot.tabs[0].file_path = None;
+        snapshot.tabs[0].scratch_path = Some(scratch.clone());
+        let mut app = App::from_snapshot(paths, snapshot);
+        let dest = dir.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let _ = app.finish_save_as(Some(dest));
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "keep me");
+        assert!(scratch.exists());
+        assert!(app.tabs[0].file_path.is_none());
+        assert_eq!(app.tabs[0].scratch_path.as_deref(), Some(scratch.as_path()));
+    }
+
+    #[test]
+    fn save_as_drops_the_scratch_after_the_new_file_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        let scratch = paths.scratch.join("scratch_1.txt");
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        std::fs::write(&scratch, "keep me").unwrap();
+        let mut snapshot = file_only(dir.path().join("unused.txt"));
+        snapshot.tabs[0].file_path = None;
+        snapshot.tabs[0].scratch_path = Some(scratch.clone());
+        let mut app = App::from_snapshot(paths, snapshot);
+        let dest = dir.path().join("note.md");
+        let _ = app.finish_save_as(Some(dest.clone()));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "keep me");
+        assert!(!scratch.exists());
+        assert_eq!(app.tabs[0].file_path.as_deref(), Some(dest.as_path()));
+        assert!(app.tabs[0].scratch_path.is_none());
+    }
+
+    #[test]
+    fn a_wider_gutter_shrinks_the_column_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path().join("subtext"));
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let mut snapshot = file_only(file);
+        snapshot.compact = true;
+        snapshot.width = 800;
+        snapshot.height = 400;
+        let mut app = App::from_snapshot(paths, snapshot);
+        let columns = app.columns;
+        let gutter = app.gutter();
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text(&"x\n".repeat(10_000));
+        assert!(app.gutter() > gutter);
+        app.reclamp();
+        assert!(app.columns < columns);
+    }
+
+    #[test]
+    fn gutter_digits_grow_past_four() {
+        assert_eq!(gutter_digits(1, true), 2);
+        assert_eq!(gutter_digits(100, true), 3);
+        assert_eq!(gutter_digits(1, false), 4);
+        assert_eq!(gutter_digits(9_999, false), 4);
+        assert_eq!(gutter_digits(10_000, false), 5);
+        assert_eq!(gutter_digits(10_000, true), 5);
     }
 }

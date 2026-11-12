@@ -58,7 +58,7 @@ The plate follows the pointer while a grip is held, including after the cursor l
 
 The tab row sits on the screen-edge side: below the editor for a bottom drawer, above it for the others. Find sits between the editor and the tab row. The row is a few pixels tall and scrolls horizontally. The vertical wheel scrolls it sideways. Each tab has its own close button. There is no overflow chevron.
 
-Compact is off by default. On, the editor padding drops from 16px to 8px and the line-number gutter shrinks to the digits the active tab needs, with a floor of two. The window size stays put; the text area grows inside it.
+Compact is off by default. On, the editor padding drops from 16px to 8px and the line-number gutter shrinks to the digits the active tab needs, with a floor of two. Off, the gutter stays four digits wide until the line count needs more. Switching tabs or crossing a digit boundary updates the column count. The window size stays put unless the new gutter no longer fits; the text area changes inside it.
 
 ## Settings
 
@@ -71,10 +71,10 @@ Automatic close is on by default. Off ignores a click outside and an unfocus, an
 `$XDG_CONFIG_HOME/subtext`, or `~/.config/subtext`:
 
 - `state.json` holds the anchor, both saved sizes, the active tab, cursor and scroll, the display choice, and the settings.
-- `scratch/` holds the text of scratch tabs.
-- File tabs store metadata only. The bytes live at the file path.
+- `scratch/` holds the text of scratch tabs. A scratch is written when its text has changed and state is saved, so a restart can restore it.
+- File tabs store metadata only. Their bytes are written on Save, Save As, when that tab is closed, and when the drawer hides. Changing a setting or switching tabs does not rewrite them.
 
-State is written when the drawer hides, when a setting changes, and when a buffer is saved. Restoring a tab puts the caret back and scrolls the editor to that line.
+State is written when the drawer hides, when a setting changes, and when a buffer is saved. Each write goes to a temporary file and is renamed into place. Restoring a tab that cannot be read leaves the original file untouched. A failed Save As leaves the scratch file in place. Restoring a tab puts the caret back and scrolls the editor to that line.
 
 ## Modules
 

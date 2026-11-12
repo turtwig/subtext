@@ -28,6 +28,8 @@ pub struct Tab {
     pub language: Language,
     pub content: text_editor::Content,
     pub dirty: bool,
+    /// The backing file exists but could not be read. Nothing may replace it.
+    unreadable: bool,
     pub cursor_line: usize,
     pub cursor_column: usize,
     pub scroll_lines: i32,
@@ -43,10 +45,23 @@ struct Mark {
 
 const HISTORY: usize = 100;
 
+/// Read a backing file. A missing file is a new buffer. Any other failure
+/// must not be saved back over the original.
+fn load_text(path: &Path) -> (String, bool) {
+    match fs::read_to_string(path) {
+        Ok(text) => (text, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+        Err(error) => {
+            eprintln!("subtext: could not read {}: {error}", path.display());
+            (String::new(), true)
+        }
+    }
+}
+
 impl Tab {
     pub fn new_scratch(dir: &Path, index: u32) -> Self {
         let scratch_path = dir.join(format!("scratch_{index}.txt"));
-        let text = fs::read_to_string(&scratch_path).unwrap_or_default();
+        let (text, unreadable) = load_text(&scratch_path);
         Self::from_parts(
             Uuid::new_v4().to_string(),
             format!("Scratch {index}"),
@@ -57,6 +72,7 @@ impl Tab {
             0,
             0,
             0,
+            unreadable,
         )
     }
 
@@ -77,6 +93,7 @@ impl Tab {
             0,
             0,
             0,
+            false,
         ))
     }
 
@@ -85,10 +102,10 @@ impl Tab {
             .file_path
             .clone()
             .or_else(|| record.scratch_path.clone());
-        let text = path
+        let (text, unreadable) = path
             .as_ref()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .unwrap_or_default();
+            .map(|path| load_text(path))
+            .unwrap_or_else(|| (String::new(), false));
         Self::from_parts(
             record.id,
             record.title,
@@ -99,6 +116,7 @@ impl Tab {
             record.cursor_line,
             record.cursor_column,
             record.scroll_lines,
+            unreadable,
         )
     }
 
@@ -112,6 +130,7 @@ impl Tab {
         cursor_line: usize,
         cursor_column: usize,
         scroll_lines: i32,
+        unreadable: bool,
     ) -> Self {
         let mut content = text_editor::Content::with_text(&text);
         content.move_to(text_editor::Cursor {
@@ -134,6 +153,7 @@ impl Tab {
             language,
             content,
             dirty: false,
+            unreadable,
             cursor_line,
             cursor_column,
             scroll_lines,
@@ -428,7 +448,7 @@ impl Tab {
         cosmic_text::layout_snap(lines, bytes, first, last)
     }
 
-    /// Number of lines in the buffer. 1 for an empty buffer.
+    /// Buffer lines, not a copy of the text. 1 for an empty buffer.
     pub fn line_count(&self) -> u32 {
         self.content.line_count().max(1) as u32
     }
@@ -442,6 +462,11 @@ impl Tab {
         self.file_path.is_none() && !self.content.is_empty()
     }
 
+    /// The backing file could not be read, so it must not be replaced or deleted.
+    pub(crate) fn unreadable(&self) -> bool {
+        self.unreadable
+    }
+
     /// Path the buffer is written to. Real files win over the scratch copy.
     pub fn store_path(&self) -> Option<&Path> {
         self.file_path.as_deref().or(self.scratch_path.as_deref())
@@ -451,12 +476,20 @@ impl Tab {
         let Some(path) = self.store_path().map(|path| path.to_path_buf()) else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&path, self.text())?;
+        self.write_to(&path)?;
         self.dirty = false;
         Ok(())
+    }
+
+    /// Write the buffer to `path` without changing where this tab is stored.
+    pub fn write_to(&self, path: &Path) -> Result<(), std::io::Error> {
+        if self.unreadable {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing to overwrite a file that could not be read",
+            ));
+        }
+        crate::state::atomic_write(path, self.text().as_bytes())
     }
 
     #[cfg(test)]
@@ -481,6 +514,54 @@ impl Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_count_reads_the_buffer_length() {
+        let tab = Tab::testing("one\ntwo\nthree");
+        assert_eq!(tab.line_count(), 3);
+        assert_eq!(Tab::testing("").line_count(), 1);
+    }
+
+    #[test]
+    fn a_failed_read_is_never_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        fs::create_dir(&file).unwrap();
+        let mut tab = Tab::from_record(Record {
+            id: "file".into(),
+            title: "note.txt".into(),
+            file_path: Some(file.clone()),
+            scratch_path: None,
+            language: Language::Plain,
+            cursor_line: 0,
+            cursor_column: 0,
+            scroll_lines: 0,
+        });
+        assert!(tab.unreadable);
+        tab.dirty = true;
+        assert!(tab.write_buffer().is_err());
+        assert!(file.is_dir());
+    }
+
+    #[test]
+    fn a_missing_file_can_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("new.txt");
+        let mut tab = Tab::from_record(Record {
+            id: "file".into(),
+            title: "new.txt".into(),
+            file_path: Some(file.clone()),
+            scratch_path: None,
+            language: Language::Plain,
+            cursor_line: 0,
+            cursor_column: 0,
+            scroll_lines: 0,
+        });
+        assert!(!tab.unreadable);
+        tab.content = text_editor::Content::with_text("hello");
+        tab.write_buffer().unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+    }
 
     #[test]
     fn the_gutter_uses_the_editor_buffer() {

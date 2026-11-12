@@ -2,10 +2,12 @@
 //!
 //! The daemon binds `$XDG_RUNTIME_DIR/subtext.sock`. A client writes
 //! `toggle`, `show`, or `hide` and exits. A stale socket file is removed
-//! when nothing is listening.
+//! when nothing is listening. Without `XDG_RUNTIME_DIR` the socket lives in
+//! a `0700` directory under `/tmp`.
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -156,7 +158,13 @@ fn bind_at(path: &Path) -> Result<UnixListener, BindError> {
             }
         }
     }
-    Ok(UnixListener::bind(path)?)
+    let listener = UnixListener::bind(path)?;
+    if let Ok(meta) = fs::metadata(path) {
+        let mut permissions = meta.permissions();
+        permissions.set_mode(0o600);
+        let _ = fs::set_permissions(path, permissions);
+    }
+    Ok(listener)
 }
 
 fn send_to(path: &Path, command: Command) -> io::Result<()> {
@@ -170,7 +178,27 @@ fn runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
-    std::env::temp_dir().join(format!("subtext-{}", uid()))
+    let dir = std::env::temp_dir().join(format!("subtext-{}", uid()));
+    if let Err(error) = prepare_private_dir(&dir) {
+        eprintln!("subtext: runtime dir {}: {error}", dir.display());
+    }
+    dir
+}
+
+/// The fallback under `/tmp` is not created by the session, so it does not
+/// inherit the privacy of `XDG_RUNTIME_DIR`. Keep it owner-only.
+fn prepare_private_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let meta = fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "runtime directory is a symlink",
+        ));
+    }
+    let mut permissions = meta.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(dir, permissions)
 }
 
 fn uid() -> u32 {
@@ -210,6 +238,19 @@ mod tests {
         });
         send_to(&path, Command::Show).unwrap();
         assert_eq!(server.join().unwrap(), Command::Show);
+    }
+
+    #[test]
+    fn the_fallback_runtime_dir_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subtext-user");
+        fs::create_dir(&path).unwrap();
+        let mut loose = fs::metadata(&path).unwrap().permissions();
+        loose.set_mode(0o755);
+        fs::set_permissions(&path, loose).unwrap();
+        prepare_private_dir(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

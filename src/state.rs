@@ -9,8 +9,8 @@ use crate::geom::Edge;
 use crate::look::{self, FontChoice, TextUnit, ThemeChoice};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -136,10 +136,56 @@ pub fn write(paths: &Paths, snapshot: &Snapshot) -> io::Result<()> {
     fs::create_dir_all(&paths.root)?;
     let text = serde_json::to_string_pretty(snapshot)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let temporary = paths.state.with_extension("json.tmp");
-    fs::write(&temporary, text)?;
-    fs::rename(&temporary, &paths.state)?;
-    Ok(())
+    atomic_write(&paths.state, text.as_bytes())
+}
+
+/// Replace `path` by writing a sibling temp file and renaming it into place.
+///
+/// A crash during the write leaves the previous file intact. A symlink is
+/// followed, so the link itself stays and the target is replaced.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let path = if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = temporary_path(&path);
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        if let Ok(meta) = fs::metadata(&path) {
+            let _ = fs::set_permissions(&temporary, meta.permissions());
+        }
+        fs::rename(&temporary, &path)?;
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("subtext"));
+    name.push(".subtext-tmp");
+    path.with_file_name(name)
 }
 
 fn config_root() -> PathBuf {
@@ -203,7 +249,12 @@ mod tests {
         let loaded = read(&paths).unwrap().unwrap();
         assert_eq!(loaded, snapshot);
         assert!(paths.state.is_file());
-        assert!(!paths.state.with_extension("json.tmp").exists());
+        assert!(
+            !paths
+                .state
+                .with_file_name("state.json.subtext-tmp")
+                .exists()
+        );
     }
 
     #[test]
@@ -231,5 +282,41 @@ mod tests {
         assert!(snapshot.output_name.is_empty());
         assert_eq!(snapshot.text_size, 16.0);
         assert_eq!(snapshot.text_unit, TextUnit::Pt);
+    }
+
+    #[test]
+    fn atomic_write_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "old").unwrap();
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(!dir.path().join("note.txt.subtext-tmp").exists());
+    }
+
+    #[test]
+    fn atomic_write_follows_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, "old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        atomic_write(&link, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn a_failed_atomic_write_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blocked");
+        fs::create_dir(&path).unwrap();
+        assert!(atomic_write(&path, b"new").is_err());
+        assert!(path.is_dir());
     }
 }
