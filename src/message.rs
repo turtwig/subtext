@@ -18,8 +18,8 @@ pub fn open_layer(settings: NewLayerShellSettings) -> (window::Id, iced::Task<Me
     Message::layershell_open(settings)
 }
 
-/// Client size of the settings window.
-pub const SETTINGS_SIZE: (u32, u32) = (460, 788);
+/// Client size of the settings window. The rows fit; it does not scroll.
+pub const SETTINGS_SIZE: (u32, u32) = (480, 722);
 
 /// Opens the settings window on the overlay layer, centered on the output.
 ///

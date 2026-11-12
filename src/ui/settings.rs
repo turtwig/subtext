@@ -1,5 +1,7 @@
 //! Settings live on their own overlay surface, above the drawer, so the
-//! editor stays visible while a choice changes.
+//! editor stays visible while a choice changes. The control sits on the
+//! title's line. A second line is only there when the control still does
+//! not say what it changes.
 
 use crate::editor::{Language, TabStop};
 use crate::geom::Edge;
@@ -8,6 +10,9 @@ use crate::message::Message;
 use crate::output::{self, Screen};
 use iced::widget::{button, column, container, pick_list, row, slider, text};
 use iced::{Border, Element, Length, Theme, alignment};
+
+/// Room for the longest title, "Compact layout", on one line.
+const LABEL: f32 = 136.0;
 
 pub struct Model {
     pub theme: ThemeChoice,
@@ -78,13 +83,14 @@ pub fn view(model: Model) -> Element<'static, Message> {
             .align_y(alignment::Vertical::Center),
             labeled("Theme", theme),
             labeled("Font", font),
-            labeled(
-                "Hint",
-                toggle_button("Hinting", model.hinting, Message::ToggleHinting),
+            explained(
+                "Hinting",
+                toggle_button("Glyph hinting", model.hinting, Message::ToggleHinting),
+                "Snaps glyphs to the pixel grid.",
             ),
-            labeled("Syntax", syntax),
+            labeled("Highlighting", syntax),
             labeled(
-                "Size",
+                "Text size",
                 row![
                     text_button("A−", Message::FontSmaller),
                     text(format!("{:.0}", model.text_size)).size(14),
@@ -96,16 +102,17 @@ pub fn view(model: Model) -> Element<'static, Message> {
                 .align_y(alignment::Vertical::Center),
             ),
             labeled(
-                "Wrap",
-                toggle_button("Word wrap", model.word_wrap, Message::ToggleWrap),
+                "Wrapping",
+                toggle_button("Wrap lines", model.word_wrap, Message::ToggleWrap),
             ),
-            labeled(
-                "Layout",
-                toggle_button("Compact", model.compact, Message::ToggleCompact),
+            explained(
+                "Compact layout",
+                toggle_button("Reduce margins", model.compact, Message::ToggleCompact),
+                "Less padding and a narrower gutter.",
             ),
-            labeled("Tabs", tabs),
+            labeled("Tab inserts", tabs),
             labeled(
-                "Enter",
+                "Indent on Enter",
                 toggle_button(
                     "Remember indent",
                     model.remember_indent,
@@ -127,21 +134,29 @@ pub fn view(model: Model) -> Element<'static, Message> {
             ),
             labeled(
                 "Blur",
-                toggle_button("Background", model.blur, Message::ToggleBlur),
+                toggle_button("Blur background", model.blur, Message::ToggleBlur),
             ),
-            labeled("Edge", edges),
+            labeled("Screen edge", edges),
             labeled(
-                "Follow",
-                toggle_button("Cursor", model.follow_cursor, Message::ToggleFollowCursor),
+                "Follow cursor",
+                toggle_button(
+                    "Open on Active Display",
+                    model.follow_cursor,
+                    Message::ToggleFollowCursor
+                ),
             ),
-            labeled("Show on", display),
+            explained("Show on", display, "Picking a display turns follow off.",),
             labeled(
-                "Close",
-                toggle_button("Automatically", model.click_away, Message::ToggleClickAway),
+                "Click outside",
+                toggle_button(
+                    "Automatically dismiss Subtext",
+                    model.click_away,
+                    Message::ToggleClickAway
+                ),
             ),
         ]
-        .spacing(12)
-        .padding(16),
+        .spacing(14)
+        .padding(14),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -162,16 +177,44 @@ pub fn view(model: Model) -> Element<'static, Message> {
 }
 
 fn labeled<'a>(
-    label: &'static str,
+    title: &'static str,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     row![
-        text(label).size(14).width(Length::Fixed(72.0)),
+        text(title).size(14).width(Length::Fixed(LABEL)),
         control.into(),
     ]
     .spacing(8)
     .align_y(alignment::Vertical::Center)
     .into()
+}
+
+/// Title and control on one line, then a single explanation under the control.
+fn explained<'a>(
+    title: &'static str,
+    control: impl Into<Element<'a, Message>>,
+    help: &'static str,
+) -> Element<'a, Message> {
+    column![
+        labeled(title, control),
+        row![
+            iced::widget::space::horizontal().width(Length::Fixed(LABEL + 8.0)),
+            text(help)
+                .size(12)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::None)
+                .style(note_style),
+        ]
+        .align_y(alignment::Vertical::Center),
+    ]
+    .spacing(1)
+    .into()
+}
+
+fn note_style(theme: &Theme) -> text::Style {
+    let mut color = theme.extended_palette().background.base.text;
+    color.a = 0.72;
+    text::Style { color: Some(color) }
 }
 
 fn edge_button(edge: Edge, current: Edge) -> Element<'static, Message> {
