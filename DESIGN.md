@@ -76,6 +76,34 @@ Automatic close is on by default. Off ignores a click outside and an unfocus, an
 
 State is written when the drawer hides, when a setting changes, and when a buffer is saved. Each write goes to a temporary file and is renamed into place. Restoring a tab that cannot be read leaves the original file untouched. A failed Save As leaves the scratch file in place. Restoring a tab puts the caret back and scrolls the editor to that line.
 
+### Reconciling a file that changed while it was open
+
+A scratch directory on a network share, or a file edited in another program, can change while a buffer is still loaded. Subtext does not poll. `App::show` rereads every tab. `Tab::flush` rereads again immediately before an automatic or explicit write. A settings change still does not rewrite clean files. It only reconciles a buffer that is about to be written.
+
+The baseline is `Tab::synced`: the editor text last loaded or saved. It is not stored in `state.json`. A restart loads the file and that load becomes the baseline, so unsaved edits exist only inside a running process. Comparisons use the editor's own text, after `Content::with_text`, so a newline the editor keeps does not look like a disk change.
+
+`Tab::reconcile_disk` reads the store path (the real file, or the scratch file) and then:
+
+- No path, an unreadable tab, or a file that is missing: leave the buffer. A missing file is not recreated and the buffer is not wiped. A later save can create it. A read error other than `NotFound` is printed and returns `Failed`. It does not set `unreadable`, or one transient error would lock the file forever. `Failed` skips the write.
+- Disk and buffer match: the buffer is clean and in sync. Any conflict flag is cleared.
+- The buffer still equals the baseline: this side did not edit. Adopt the disk text, clear undo and redo, and clear the dirty flag. Undo must not be able to restore the stale text and save it over the other copy. An empty file is adopted too. A failed or partial read never reaches this path.
+- The disk still equals the baseline: only this buffer changed. Keep it.
+- Otherwise both sides diverged from the baseline. `editor::merge::merge` splits on `\n`, keeping the newline on the line, and runs a Myers diff from the baseline to each side. Hunks that do not cover the same baseline lines are combined. An insert sits at the point in front of a baseline line: two different inserts at the same point conflict, and an insert does not conflict with a replacement that ends at that point. Identical edits are kept once. If the edit distance passes 1000, the whole buffer is marked rather than tracing a large rewrite.
+
+A clean merge installs the combined text and records one undo step back to this computer's text. `synced` stays the disk text that was merged against, not the combined buffer. Setting it to the combination would make the next remote edit look like the only change and drop the unwritten local half. The buffer stays dirty when the combination differs from the disk, so the next hide writes it and both sides meet.
+
+A conflict installs markers and sets `conflicted` and `saw_conflict`:
+
+```
+<<<<<<< subtext (this computer)
+=======
+>>>>>>> subtext (other copy)
+```
+
+The marker prefix is `editor::merge::OURS_MARK`. Notes that merely contain that sentence are not treated as a conflict. `saw_conflict` is what makes undo and redo arm the flag again. Automatic flush (`hide`, scratch persist, closing a file tab) returns an error while `conflicted` or `saw_conflict` is set, leaves the file untouched, and leaves the tab open. Closing a scratch deletes its file only when `reconcile_disk` returns `Unchanged`. A reload, merge, conflict, or failed read leaves the file and the tab in place.
+
+Editing the markers out clears both flags, so the next hide can save the resolution. Undo back to this computer's pre-conflict text removes the markers but leaves `saw_conflict` set, so that hide still will not replace the other copy. Ctrl+S and Save As are explicit: they write the buffer even when it is marked, then clear the flags and set the baseline to the written text. Save As still reconciles first, so a clean merge is what gets written to the new path.
+
 ## Modules
 
 ```
@@ -91,7 +119,7 @@ src/
   slide.rs           Wayland connection for the blur hook
   fade.rs            plate opacity for a recorded layer
   glibc_compat.rs    acosf and atan2f symbol wrap
-  editor/            tabs, find, indent, wrap, syntax
+  editor/            tabs, find, indent, wrap, syntax, merge
   ui/                plate, tabs, settings, grips, scrollbar
 ```
 

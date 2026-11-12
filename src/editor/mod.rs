@@ -1,5 +1,6 @@
 pub mod find;
 pub mod indent;
+pub mod merge;
 pub mod syntax;
 pub mod tab;
 pub mod wrap;

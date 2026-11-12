@@ -633,6 +633,7 @@ impl App {
     }
 
     fn show(&mut self) -> Task<Message> {
+        self.reconcile_tabs();
         self.suppress_unfocus_until = Instant::now() + UNFOCUS_GRACE;
         self.recall_cursor();
         self.refresh_screens();
@@ -975,14 +976,25 @@ impl App {
         }
         let mut tab = self.tabs.remove(index);
         if tab.file_path.is_some() && !tab.unreadable() {
-            if let Err(error) = tab.write_buffer() {
+            if let Err(error) = tab.flush(false) {
                 eprintln!("subtext: save {}: {error}", tab.location_label());
                 self.tabs.insert(index, tab);
                 return Task::none();
             }
         } else if tab.file_path.is_none() && !tab.unreadable() {
-            if let Some(path) = tab.scratch_path.take() {
-                let _ = std::fs::remove_file(path);
+            // Closing a scratch deletes its file. A shared copy that changed
+            // underneath this buffer stays where it is.
+            if tab.disk_matches_baseline() {
+                if let Some(path) = tab.scratch_path.take() {
+                    let _ = std::fs::remove_file(path);
+                }
+            } else {
+                eprintln!(
+                    "subtext: {} changed on disk, left open",
+                    tab.location_label()
+                );
+                self.tabs.insert(index, tab);
+                return Task::none();
             }
         }
         if self.pending_close == Some(index) {
@@ -1012,7 +1024,7 @@ impl App {
             .is_some();
         if has_file {
             if let Some(tab) = self.tabs.get_mut(self.active) {
-                if let Err(error) = tab.write_buffer() {
+                if let Err(error) = tab.flush(true) {
                     eprintln!("subtext: save {}: {error}", tab.location_label());
                 }
             }
@@ -1078,6 +1090,13 @@ impl App {
             let Some(tab) = self.tabs.get_mut(self.active) else {
                 return restore;
             };
+            if matches!(tab.reconcile_disk(), crate::editor::tab::Refresh::Failed) {
+                eprintln!(
+                    "subtext: save {}: could not reread the file, leaving it untouched",
+                    path.display()
+                );
+                return restore;
+            }
             if let Err(error) = tab.write_to(&path) {
                 eprintln!("subtext: save {}: {error}", path.display());
                 return restore;
@@ -1091,7 +1110,7 @@ impl App {
                 .unwrap_or_else(|| path.display().to_string());
             tab.language = crate::editor::Language::from_path(&path);
             tab.file_path = Some(path);
-            tab.dirty = false;
+            tab.note_saved();
         }
         self.ensure_scratch();
         self.persist();
@@ -1889,6 +1908,18 @@ impl App {
         }
     }
 
+    /// Reread every open file. Called when the drawer is shown, before the
+    /// user keeps typing into a copy that another computer already replaced.
+    fn reconcile_tabs(&mut self) {
+        let gutter = self.gutter();
+        for tab in &mut self.tabs {
+            let _ = tab.reconcile_disk();
+        }
+        if self.gutter() != gutter {
+            self.reclamp();
+        }
+    }
+
     /// Settings, tab choice, and cursor. Dirty scratch buffers are written too,
     /// so a restart can restore them. Open files are left alone.
     fn persist(&mut self) {
@@ -1912,7 +1943,7 @@ impl App {
             if !tab.dirty {
                 continue;
             }
-            if let Err(error) = tab.write_buffer() {
+            if let Err(error) = tab.flush(false) {
                 eprintln!("subtext: save {}: {error}", tab.location_label());
             }
         }
@@ -2386,6 +2417,69 @@ mod tests {
         assert!(app.gutter() > gutter);
         app.reclamp();
         assert!(app.columns < columns);
+    }
+
+    fn scratch_app(dir: &std::path::Path, text: &str) -> (std::path::PathBuf, App) {
+        let paths = Paths::under(dir.join("subtext"));
+        let scratch = paths.scratch.join("scratch_1.txt");
+        std::fs::create_dir_all(&paths.scratch).unwrap();
+        std::fs::write(&scratch, text).unwrap();
+        let mut snapshot = file_only(dir.join("unused.txt"));
+        snapshot.tabs[0].file_path = None;
+        snapshot.tabs[0].scratch_path = Some(scratch.clone());
+        snapshot.tabs[0].title = "Scratch 1".into();
+        (scratch, App::from_snapshot(paths, snapshot))
+    }
+
+    #[test]
+    fn opening_reloads_a_scratch_another_computer_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (scratch, mut app) = scratch_app(dir.path(), "one\n");
+        std::fs::write(&scratch, "two\n").unwrap();
+        app.reconcile_tabs();
+        assert_eq!(app.tabs[0].text(), "two\n");
+        assert!(!app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn closing_a_scratch_does_not_delete_a_newer_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (scratch, mut app) = scratch_app(dir.path(), "one\n");
+        std::fs::write(&scratch, "two\n").unwrap();
+        let _ = app.close_tab(0);
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "two\n");
+        assert_eq!(app.tabs[0].text(), "two\n");
+    }
+
+    #[test]
+    fn hiding_merges_a_shared_scratch_instead_of_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (scratch, mut app) = scratch_app(dir.path(), "a\n");
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text("a\nlocal\n");
+        app.tabs[0].dirty = true;
+        std::fs::write(&scratch, "remote\na\n").unwrap();
+        app.persist_documents();
+        assert_eq!(
+            std::fs::read_to_string(&scratch).unwrap(),
+            "remote\na\nlocal\n"
+        );
+    }
+
+    #[test]
+    fn hiding_does_not_write_a_conflict_over_the_shared_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (scratch, mut app) = scratch_app(dir.path(), "a\n");
+        app.tabs[0].content = iced::widget::text_editor::Content::with_text("local\n");
+        app.tabs[0].dirty = true;
+        std::fs::write(&scratch, "remote\n").unwrap();
+        app.persist_documents();
+        assert_eq!(std::fs::read_to_string(&scratch).unwrap(), "remote\n");
+        assert!(app.tabs[0].conflicted());
+        assert!(
+            app.tabs[0]
+                .text()
+                .contains("<<<<<<< subtext (this computer)")
+        );
     }
 
     #[test]

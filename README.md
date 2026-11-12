@@ -61,6 +61,27 @@ Open files, scratch text, the cursor, scroll position, anchor edge, sizes, and s
 - `scratch/` holds scratch tabs (`scratch_1.txt`, and so on).
 - A real file is written at its own path.
 
+The scratch directory can live on a shared folder, with each computer symlinking its config directory at that share. Subtext does not watch the files while the drawer is open. It rereads them when the drawer is shown, and again immediately before it writes.
+
+Each open buffer remembers the text it last loaded or saved. That remembered text is the baseline. The next read compares three copies: the baseline, the text in the buffer, and the file on disk.
+
+- Only the file changed, and this buffer was not edited. The buffer becomes the file, including a full rewrite. Undo is cleared, so it cannot put the old text back and save it.
+- Only this buffer changed. The buffer is kept and written as usual.
+- Both changed, on different lines. The two edits are combined. Undo once to return to the text from this computer. The other copy stays the baseline, so a later edit on the other computer is merged again instead of discarding this half.
+- Both changed on the same lines, or both appended different text at the same place. The buffer is marked and nothing is written over the file:
+
+```
+<<<<<<< subtext (this computer)
+this computer's lines
+=======
+the other copy's lines
+>>>>>>> subtext (other copy)
+```
+
+Delete the markers and keep the lines you want. The next hide then saves. Ctrl+S writes the buffer as it stands, markers included, and that becomes the new baseline. Hiding, closing the tab, or any other automatic save will not overwrite a conflict, and will not delete a scratch whose file changed on disk. Undoing back to this computer's text does not count as resolving it. A failed reread leaves both the buffer and the file alone.
+
+The same rules apply when a file is edited in another program while it is open here. Both computers need this version. A drawer that is already open picks the other copy up the next time it opens, and before it saves.
+
 ## Build
 
 ```bash
