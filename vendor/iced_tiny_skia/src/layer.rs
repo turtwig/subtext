@@ -245,7 +245,7 @@ impl Layer {
             |item| {
                 item.as_slice()
                     .iter()
-                    .filter_map(Text::visible_bounds)
+                    .filter_map(text_region)
                     .map(|bounds| bounds * item.transformation())
                     .collect()
             },
@@ -257,11 +257,11 @@ impl Layer {
                 {
                     let mut regions = Vec::new();
                     regions.extend(text_a.as_slice().iter().filter_map(|text| {
-                        text.visible_bounds()
+                        text_region(text)
                             .map(|bounds| bounds * text_a.transformation())
                     }));
                     regions.extend(text_b.as_slice().iter().filter_map(|text| {
-                        text.visible_bounds()
+                        text_region(text)
                             .map(|bounds| bounds * text_b.transformation())
                     }));
                     // Live text reports an infinite clip. Damaging that clears a
@@ -278,7 +278,7 @@ impl Layer {
                     text_a.as_slice(),
                     text_b.as_slice(),
                     |text| {
-                        text.visible_bounds()
+                        text_region(text)
                             .into_iter()
                             .map(|bounds| bounds * text_a.transformation())
                             .collect()
@@ -428,6 +428,44 @@ impl graphics::Layer for Layer {
     }
 }
 
+/// Region to redraw for one text primitive.
+///
+/// `fill_text` records the anchor box. Right alignment paints the glyphs
+/// to the left of that box, and Center paints them around the anchor.
+/// Damaging only the recorded box clears the editor margin and leaves the
+/// old gutter digits where they were. Compact numbers are two digits wide,
+/// so the missed strip is the tens digit and the ones digit still updates.
+pub fn text_region(text: &Text) -> Option<Rectangle> {
+    let Text::Cached {
+        bounds,
+        clip_bounds,
+        align_x,
+        align_y,
+        ..
+    } = text
+    else {
+        return text.visible_bounds();
+    };
+    let mut ink = *bounds;
+    ink.x = match align_x {
+        crate::core::text::Alignment::Right => bounds.x - bounds.width,
+        crate::core::text::Alignment::Center => bounds.x - bounds.width / 2.0,
+        crate::core::text::Alignment::Default
+        | crate::core::text::Alignment::Left
+        | crate::core::text::Alignment::Justified => bounds.x,
+    };
+    ink.y = match align_y {
+        crate::core::alignment::Vertical::Center => {
+            bounds.y - bounds.height / 2.0
+        }
+        crate::core::alignment::Vertical::Bottom => bounds.y - bounds.height,
+        crate::core::alignment::Vertical::Top => bounds.y,
+    };
+    // Glyphs overhang the layout box by a pixel or two. Expand after the
+    // clip so that ink is still damaged when it sits on the clip edge.
+    ink.intersection(clip_bounds).map(|ink| ink.expand(2.0))
+}
+
 fn finite_damage(bounds: Rectangle) -> Option<Rectangle> {
     if bounds.x.is_finite()
         && bounds.y.is_finite()
@@ -474,5 +512,75 @@ impl<T> Item<T> {
             Item::Group(group, _, _) => group.as_slice(),
             Item::Cached(cache, _, _) => cache,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::text::{Alignment, Shaping};
+    use crate::core::{Color, Font, Pixels, Point, Size};
+    use crate::graphics::text::Text;
+
+    fn cached(content: &str, x: f32, align_x: Alignment) -> Text {
+        Text::Cached {
+            content: content.to_string(),
+            bounds: Rectangle::new(Point::new(x, 30.0), Size::new(20.0, 22.0)),
+            color: Color::WHITE,
+            size: Pixels(11.2),
+            line_height: Pixels(22.0),
+            font: Font::MONOSPACE,
+            align_x,
+            align_y: crate::core::alignment::Vertical::Top,
+            shaping: Shaping::Advanced,
+            clip_bounds: Rectangle::new(Point::ORIGIN, Size::new(400.0, 300.0)),
+        }
+    }
+
+    fn covers(regions: &[Rectangle], point: Point) -> bool {
+        regions.iter().any(|region| region.contains(point))
+    }
+
+    #[test]
+    fn right_aligned_damage_covers_the_digits_left_of_the_anchor() {
+        let mut previous = Layer::default();
+        let mut current = Layer::default();
+        // Anchor at x=48. The 20px shaping box, and the digits, sit to its left.
+        previous
+            .text
+            .push(Item::Live(cached("53", 48.0, Alignment::Right)));
+        current
+            .text
+            .push(Item::Live(cached("73", 48.0, Alignment::Right)));
+        let damage = Layer::damage(&previous, &current);
+        assert!(
+            covers(&damage, Point::new(30.0, 40.0)),
+            "tens digit was not damaged: {damage:?}"
+        );
+        assert!(
+            covers(&damage, Point::new(46.0, 40.0)),
+            "ones digit was not damaged: {damage:?}"
+        );
+    }
+
+    #[test]
+    fn left_aligned_damage_stays_on_the_anchor_box() {
+        let mut previous = Layer::default();
+        let mut current = Layer::default();
+        previous
+            .text
+            .push(Item::Live(cached("53", 48.0, Alignment::Left)));
+        current
+            .text
+            .push(Item::Live(cached("73", 48.0, Alignment::Left)));
+        let damage = Layer::damage(&previous, &current);
+        assert!(
+            covers(&damage, Point::new(50.0, 40.0)),
+            "left-aligned text was not damaged: {damage:?}"
+        );
+        assert!(
+            !covers(&damage, Point::new(20.0, 40.0)),
+            "left-aligned damage slid off the text: {damage:?}"
+        );
     }
 }

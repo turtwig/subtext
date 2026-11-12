@@ -355,6 +355,15 @@ fn normalize(
         }
         if total < scroll_end && line > 0 {
             vertical -= scroll_end - total;
+        } else if total < scroll_end {
+            // Same clamp as `shape_until_scroll`: a short note must not keep
+            // a sub-line offset that hides the first line above the box.
+            let max_vertical = (total - view_h).max(0.0);
+            if vertical > max_vertical {
+                vertical = max_vertical;
+            } else {
+                break;
+            }
         } else {
             break;
         }
@@ -511,6 +520,23 @@ mod tests {
         assert_eq!(view.slots[0].number, Some(8));
         assert!(view.lead.abs() < 0.01);
         assert_eq!(view.slots[2].number, Some(10));
+    }
+
+    #[test]
+    fn a_short_note_scrolled_past_the_top_comes_back() {
+        // Eleven lines at 22px fit in a 400px box. A leftover one-line scroll
+        // must not hide line 1, or the gutter and the glyphs disagree.
+        let snap = LayoutSnap {
+            line_height: 22.0,
+            scroll_line: 0,
+            scroll_vertical: 18.0,
+            viewport_height: 400.0,
+            ends: lines(11),
+        };
+        let view = from_snap(&snap, 12, 10, 0);
+        assert_eq!(view.slots[0].number, Some(1));
+        assert!(view.lead.abs() < 0.01, "lead {}", view.lead);
+        assert_eq!(view.top_line, 0);
     }
 
     #[test]

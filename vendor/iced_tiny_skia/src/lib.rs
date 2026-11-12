@@ -26,6 +26,8 @@ pub use iced_graphics::core;
 pub use fade::set_draw_opacity;
 pub use hint::set_hinting;
 pub use layer::Layer;
+#[doc(hidden)]
+pub use layer::text_region;
 pub use primitive::Primitive;
 pub use settings::Settings;
 

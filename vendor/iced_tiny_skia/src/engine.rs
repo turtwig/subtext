@@ -405,11 +405,14 @@ impl Engine {
                 shaping,
                 clip_bounds: local_clip_bounds,
             } => {
-                let physical_bounds = *local_clip_bounds * transformation;
-
-                if !clip_bounds.intersects(&physical_bounds) {
+                // Honor the widget clip. The outer viewport alone lets a
+                // gutter digit that starts above the text box paint in the
+                // padding.
+                let Some(clip_bounds) = clip_bounds
+                    .intersection(&(*local_clip_bounds * transformation))
+                else {
                     return;
-                }
+                };
 
                 let clip_mask = active_clip(clip_mask, clip_bounds);
 

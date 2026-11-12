@@ -1,25 +1,18 @@
 //! Drawer layout. Resize grips are hairlines. The editor padding sits inside
 //! the character grid's chrome so text is not flush with the frame.
 
+mod band;
 mod place;
 mod resize;
-mod scroll;
 pub mod settings;
 mod tab_bar;
 
 use crate::editor::Tab;
-use crate::editor::wrap::Slot;
 use crate::geom::{self, Edge};
 use crate::message::Message;
-use iced::advanced::layout::{self, Layout, Node};
-use iced::advanced::mouse;
-use iced::advanced::renderer;
-use iced::advanced::widget::{Tree, Widget};
 use iced::highlighter;
-use iced::widget::{button, column, container, row, space, stack, text, text_editor, text_input};
-use iced::{
-    Color, Element, Font, Length, Padding, Pixels, Point, Rectangle, Size, Theme, alignment,
-};
+use iced::widget::{button, column, container, row, text, text_editor, text_input};
+use iced::{Color, Element, Font, Length, Pixels, Theme, alignment};
 
 /// Stable id so show/tab-switch can focus the editor without a click.
 pub const EDITOR_ID: iced::widget::Id = iced::widget::Id::new("editor");
@@ -61,14 +54,11 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
     } else {
         iced_core::text::Wrapping::None
     };
-    let view = tab.viewport(drawer.rows);
     // The renderer clips glyphs to this box. Without it, unwrapped lines paint
     // across the scrollbar. The plate behind this stack is the only fill, so
     // the editor itself stays clear and the caret row can show through.
-    // One band sits behind the gutter and the text, so the padding between
-    // them does not split the highlight.
-    let highlight: Element<'a, Message> =
-        line_highlight(&view.slots, cell.height as f32, view.lead, drawer.pad);
+    // The band paints the caret row across the gutter and the text after the
+    // editor has published its layout, so the two cannot land a frame apart.
     let field: Element<'a, Message> = text_editor(&tab.content)
         .id(EDITOR_ID.clone())
         .font(drawer.font)
@@ -89,35 +79,27 @@ pub fn drawer<'a>(drawer: Drawer<'a>) -> Element<'a, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-    let mut band_parts: Vec<Element<'a, Message>> = Vec::with_capacity(2);
-    if drawer.line_numbers {
-        band_parts.push(gutter(
-            &view.slots,
-            drawer.text_size,
-            cell,
-            view.lead,
-            drawer.pad,
-            drawer.gutter,
-        ));
-    }
-    band_parts.push(editor);
-    let band: Element<'a, Message> = row(band_parts).height(Length::Fill).into();
-    let text_and_gutter: Element<'a, Message> = stack([highlight, band])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
-    let mut editor_parts: Vec<Element<'a, Message>> = Vec::with_capacity(2);
-    editor_parts.push(text_and_gutter);
     let find_extra = if drawer.find_open { geom::FIND_BAR } else { 0 };
-    editor_parts.push(scroll::bar(
+    let editor_row: Element<'a, Message> = band::band(
+        editor,
+        tab.snap_key(),
+        tab.cursor_line,
+        tab.cursor_column,
+        drawer.rows,
+        tab.line_count() as usize,
+        drawer.text_size,
+        cell.height as f32,
+        drawer.pad as f32,
+        if drawer.line_numbers {
+            drawer.gutter as f32
+        } else {
+            0.0
+        },
         drawer.edge,
         drawer.height,
-        view.total as usize,
-        view.scroll,
-        drawer.rows,
         find_extra,
-    ));
-    let editor_row: Element<'a, Message> = row(editor_parts).height(Length::Fill).into();
+    )
+    .into();
     let bar = tab_bar::view(
         drawer.tabs,
         drawer.active,
@@ -333,110 +315,11 @@ fn editor_style(theme: &Theme, status: text_editor::Status) -> text_editor::Styl
     style
 }
 
-fn line_highlight(
-    slots: &[Slot],
-    row_height: f32,
-    lead: f32,
-    editor_pad: u32,
-) -> Element<'static, Message> {
-    let rows = slots
-        .iter()
-        .map(|slot| {
-            container(space())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(if slot.current { caret_row } else { clear_row })
-                .into()
-        })
-        .collect();
-    in_text_box(editor_pad, 0.0, line_rows(lead, row_height, true, rows))
-}
-
-fn caret_row(theme: &Theme) -> container::Style {
-    let mut color = theme.extended_palette().primary.weak.color;
-    color.a = 0.35;
-    container::Style {
-        background: Some(color.into()),
-        ..container::Style::default()
-    }
-}
-
-fn clear_row(_theme: &Theme) -> container::Style {
-    container::Style::default()
-}
-
-fn gutter(
-    slots: &[Slot],
-    text_size: f32,
-    cell: geom::Cell,
-    lead: f32,
-    editor_pad: u32,
-    width: u32,
-) -> Element<'static, Message> {
-    let row_height = cell.height as f32;
-    let numbers: Vec<Element<'static, Message>> = slots
-        .iter()
-        .map(|slot| {
-            let label = slot
-                .number
-                .map(|number| number.to_string())
-                .unwrap_or_default();
-            let current = slot.current;
-            container(
-                text(label)
-                    .size(gutter_text_size(text_size))
-                    .font(Font::MONOSPACE)
-                    .line_height(iced_core::text::LineHeight::Absolute(Pixels(row_height)))
-                    .align_x(alignment::Horizontal::Right)
-                    .align_y(alignment::Vertical::Center)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .style(move |theme: &iced::Theme| iced::widget::text::Style {
-                        color: Some(theme.palette().text.scale_alpha(if current {
-                            0.9
-                        } else {
-                            0.4
-                        })),
-                    }),
-            )
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .into()
-        })
-        .collect();
-    container(in_text_box(
-        editor_pad,
-        (editor_pad / 2) as f32,
-        line_rows(lead, row_height, false, numbers),
-    ))
-    .width(Length::Fixed(width as f32))
-    .height(Length::Fill)
-    .into()
-}
-
-/// Inset by the editor padding so a partial row clips on the same edge as the glyphs.
-fn in_text_box<'a>(
-    editor_pad: u32,
-    side: f32,
-    body: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(Padding {
-            top: editor_pad as f32,
-            right: side,
-            bottom: editor_pad as f32,
-            left: side,
-        })
-        .into()
-}
-
 /// The part of a line that sits inside the text box.
 ///
 /// `origin` is the line's top relative to that box. It is negative when the
 /// line starts above the box.
-fn visible_line(origin: f32, row_height: f32, box_height: f32) -> Option<(f32, f32)> {
+pub(crate) fn visible_line(origin: f32, row_height: f32, box_height: f32) -> Option<(f32, f32)> {
     if !origin.is_finite() || !row_height.is_finite() || !box_height.is_finite() {
         return None;
     }
@@ -447,148 +330,6 @@ fn visible_line(origin: f32, row_height: f32, box_height: f32) -> Option<(f32, f
     let bottom = (origin + row_height).min(box_height);
     let height = bottom - top;
     (height > 0.0).then_some((top, height))
-}
-
-/// Lays each row on the editor's line grid and clips it to the text box.
-///
-/// A band row is only the visible slice, so its background cannot spill into
-/// the padding. A number stays centered in the full line; the text box cuts
-/// the same pixels the glyphs lose.
-struct LineRows<'a, Message, Theme, Renderer> {
-    lead: f32,
-    row_height: f32,
-    band: bool,
-    rows: Vec<Element<'a, Message, Theme, Renderer>>,
-}
-
-fn line_rows<'a, Message, Theme, Renderer>(
-    lead: f32,
-    row_height: f32,
-    band: bool,
-    rows: Vec<Element<'a, Message, Theme, Renderer>>,
-) -> LineRows<'a, Message, Theme, Renderer> {
-    LineRows {
-        lead,
-        row_height,
-        band,
-        rows,
-    }
-}
-
-impl<'a, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for LineRows<'a, Message, Theme, Renderer>
-where
-    Renderer: iced::advanced::Renderer,
-{
-    fn size(&self) -> Size<Length> {
-        Size {
-            width: Length::Fill,
-            height: Length::Fill,
-        }
-    }
-
-    fn children(&self) -> Vec<Tree> {
-        self.rows.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.rows);
-    }
-
-    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> Node {
-        if tree.children.len() != self.rows.len() {
-            tree.diff_children(&self.rows);
-        }
-        let box_size = finite_box(limits.max());
-        let lead = if self.lead.is_finite() {
-            self.lead
-        } else {
-            0.0
-        };
-        let mut children = Vec::with_capacity(self.rows.len());
-        for (index, row) in self.rows.iter_mut().enumerate() {
-            let origin = lead + index as f32 * self.row_height;
-            let (y, height) = if self.band {
-                visible_line(origin, self.row_height, box_size.height).unwrap_or((0.0, 0.0))
-            } else {
-                (origin, self.row_height.max(0.0))
-            };
-            let child_limits = layout::Limits::new(
-                Size::new(box_size.width, height),
-                Size::new(box_size.width, height),
-            );
-            let node = row
-                .as_widget_mut()
-                .layout(&mut tree.children[index], renderer, &child_limits)
-                .move_to(Point::new(0.0, y));
-            children.push(node);
-        }
-        Node::with_children(box_size, children)
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        let Some(clip) = layout.bounds().intersection(viewport) else {
-            return;
-        };
-        for (index, row) in self.rows.iter().enumerate() {
-            let Some(child) = layout.children().nth(index) else {
-                break;
-            };
-            if child.bounds().intersection(&clip).is_none() {
-                continue;
-            }
-            row.as_widget().draw(
-                &tree.children[index],
-                renderer,
-                theme,
-                style,
-                child,
-                cursor,
-                &clip,
-            );
-        }
-    }
-}
-
-impl<'a, Message, Theme, Renderer> From<LineRows<'a, Message, Theme, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    Message: 'a,
-    Theme: 'a,
-    Renderer: iced::advanced::Renderer + 'a,
-{
-    fn from(rows: LineRows<'a, Message, Theme, Renderer>) -> Self {
-        Element::new(rows)
-    }
-}
-
-fn finite_box(size: Size) -> Size {
-    Size::new(
-        if size.width.is_finite() {
-            size.width.max(0.0)
-        } else {
-            0.0
-        },
-        if size.height.is_finite() {
-            size.height.max(0.0)
-        } else {
-            0.0
-        },
-    )
-}
-
-/// Line numbers are smaller and dimmer than the buffer text.
-fn gutter_text_size(text_size: f32) -> f32 {
-    (text_size * 0.7).clamp(10.0, 16.0)
 }
 
 #[cfg(test)]

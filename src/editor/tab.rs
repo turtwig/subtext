@@ -41,6 +41,9 @@ pub struct Tab {
     /// back when the markers return. Typed notes that happen to contain the
     /// marker do not set this.
     saw_conflict: bool,
+    /// This path has been read or written. A later `NotFound` is a deletion,
+    /// not a scratch that has never been saved.
+    on_disk: bool,
     pub cursor_line: usize,
     pub cursor_column: usize,
     pub scroll_lines: i32,
@@ -69,6 +72,10 @@ pub(crate) enum Refresh {
     Conflict,
     /// The file could not be reread. The buffer and the file were both left alone.
     Failed,
+    /// The file was deleted while this buffer still has unsaved text.
+    Missing,
+    /// The file was deleted and this buffer has no unsaved text.
+    Gone,
 }
 
 fn editor_text(text: &str) -> String {
@@ -113,14 +120,15 @@ fn caret_in(text: &str, line: usize, column: usize) -> (usize, usize) {
 }
 
 /// Read a backing file. A missing file is a new buffer. Any other failure
-/// must not be saved back over the original.
-fn load_text(path: &Path) -> (String, bool) {
+/// must not be saved back over the original. The third value is whether a
+/// file was actually there.
+fn load_text(path: &Path) -> (String, bool, bool) {
     match fs::read_to_string(path) {
-        Ok(text) => (text, false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+        Ok(text) => (text, false, true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), false, false),
         Err(error) => {
             eprintln!("subtext: could not read {}: {error}", path.display());
-            (String::new(), true)
+            (String::new(), true, true)
         }
     }
 }
@@ -128,7 +136,7 @@ fn load_text(path: &Path) -> (String, bool) {
 impl Tab {
     pub fn new_scratch(dir: &Path, index: u32) -> Self {
         let scratch_path = dir.join(format!("scratch_{index}.txt"));
-        let (text, unreadable) = load_text(&scratch_path);
+        let (text, unreadable, on_disk) = load_text(&scratch_path);
         Self::from_parts(
             Uuid::new_v4().to_string(),
             format!("Scratch {index}"),
@@ -140,6 +148,7 @@ impl Tab {
             0,
             0,
             unreadable,
+            on_disk,
         )
     }
 
@@ -161,6 +170,7 @@ impl Tab {
             0,
             0,
             false,
+            true,
         ))
     }
 
@@ -169,10 +179,10 @@ impl Tab {
             .file_path
             .clone()
             .or_else(|| record.scratch_path.clone());
-        let (text, unreadable) = path
+        let (text, unreadable, on_disk) = path
             .as_ref()
             .map(|path| load_text(path))
-            .unwrap_or_else(|| (String::new(), false));
+            .unwrap_or_else(|| (String::new(), false, false));
         Self::from_parts(
             record.id,
             record.title,
@@ -184,6 +194,7 @@ impl Tab {
             record.cursor_column,
             record.scroll_lines,
             unreadable,
+            on_disk,
         )
     }
 
@@ -198,6 +209,7 @@ impl Tab {
         cursor_column: usize,
         scroll_lines: i32,
         unreadable: bool,
+        on_disk: bool,
     ) -> Self {
         let mut content = text_editor::Content::with_text(&text);
         content.move_to(text_editor::Cursor {
@@ -225,6 +237,7 @@ impl Tab {
             synced,
             conflicted: false,
             saw_conflict: false,
+            on_disk,
             cursor_line,
             cursor_column,
             scroll_lines,
@@ -417,13 +430,11 @@ impl Tab {
         self.content = text_editor::Content::with_text(text);
         self.cursor_line = line;
         self.cursor_column = column;
-        // The new buffer starts at the top, at a 1px line height. Scrolling
-        // by the caret's buffer line parks that line at the top until the
-        // editor lays the real metrics out and brings the caret on screen.
+        // The new buffer's line height is still 1px. Scrolling by the caret
+        // line here is that many pixels, and it publishes a snap that parks
+        // the caret at the top of the gutter. Leave the scroll alone. The
+        // editor reveals the caret once it has the real line height.
         self.scroll_lines = line as i32;
-        if line != 0 {
-            self.content.perform(Action::Scroll { lines: line as i32 });
-        }
         self.content.move_to(text_editor::Cursor {
             position: text_editor::Position { line, column },
             selection: None,
@@ -504,7 +515,9 @@ impl Tab {
         )
     }
 
-    fn editor_snap(&self) -> Option<std::sync::Arc<cosmic_text::LayoutSnap>> {
+    /// Key of the layout snap this buffer will publish. The gutter looks the
+    /// snap up after the editor lays out, so the key has to match `publish`.
+    pub(crate) fn snap_key(&self) -> Option<(usize, usize, u64, u64)> {
         let lines = self.content.line_count();
         if lines == 0 {
             return None;
@@ -525,6 +538,11 @@ impl Tab {
                 bytes += line.text.len();
             }
         }
+        Some((lines, bytes, first, last))
+    }
+
+    fn editor_snap(&self) -> Option<std::sync::Arc<cosmic_text::LayoutSnap>> {
+        let (lines, bytes, first, last) = self.snap_key()?;
         cosmic_text::layout_snap(lines, bytes, first, last)
     }
 
@@ -552,11 +570,11 @@ impl Tab {
         self.conflicted
     }
 
-    /// True when the file still matches the baseline, so a scratch close may
-    /// delete it. A reload, merge, conflict, or unreadable file returns false
-    /// and the caller leaves the file in place.
+    /// True when a scratch close may drop the tab. A file that was deleted
+    /// with no local edits is already gone. A reload, merge, conflict, or
+    /// unsaved buffer whose file disappeared returns false.
     pub(crate) fn disk_matches_baseline(&mut self) -> bool {
-        matches!(self.reconcile_disk(), Refresh::Unchanged)
+        matches!(self.reconcile_disk(), Refresh::Unchanged | Refresh::Gone)
     }
 
     /// Path the buffer is written to. Real files win over the scratch copy.
@@ -576,9 +594,22 @@ impl Tab {
             return Refresh::Unchanged;
         };
         let raw = match fs::read_to_string(&path) {
-            Ok(text) => text,
+            Ok(text) => {
+                self.on_disk = true;
+                text
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Refresh::Unchanged;
+                if !self.on_disk {
+                    return Refresh::Unchanged;
+                }
+                if self.dirty || self.text() != self.synced {
+                    eprintln!(
+                        "subtext: {} was deleted; unsaved text was not written back",
+                        path.display()
+                    );
+                    return Refresh::Missing;
+                }
+                return Refresh::Gone;
             }
             Err(error) => {
                 eprintln!("subtext: could not read {}: {error}", path.display());
@@ -646,6 +677,7 @@ impl Tab {
         self.synced = disk.to_string();
         self.conflicted = false;
         self.saw_conflict = false;
+        self.on_disk = true;
         self.undo.clear();
         self.redo.clear();
     }
@@ -653,11 +685,16 @@ impl Tab {
     /// `edited` means a keystroke, not undo or a disk refresh. Resolving the
     /// markers by editing is what allows the next automatic save. Undoing back
     /// to this computer's text is not, or that save would replace the other copy.
+    ///
+    /// Any leftover opener, divider, or closer keeps the conflict. Deleting or
+    /// shortening one of them is not enough.
     fn refresh_conflict_flag(&mut self, edited: bool) {
-        let marked = self.text().contains(merge::OURS_MARK);
-        if marked && self.saw_conflict {
+        if !self.saw_conflict {
+            return;
+        }
+        if merge::has_conflict_marker(&self.text()) {
             self.conflicted = true;
-        } else if !marked {
+        } else {
             self.conflicted = false;
             if edited {
                 self.saw_conflict = false;
@@ -665,39 +702,71 @@ impl Tab {
         }
     }
 
-    /// Write this buffer back. `explicit` is Save or Save As: a conflict is
-    /// the user's decision and may replace the file. An automatic save will
-    /// not, and a file that could not be reread is left untouched either way.
+    /// Write this buffer back. `explicit` is Save or Save As: a conflict or a
+    /// deleted file is the user's decision and may replace the file. An
+    /// automatic save will not. A file that changed after this read is read
+    /// again instead of being overwritten.
     pub(crate) fn flush(&mut self, explicit: bool) -> Result<(), std::io::Error> {
-        match self.reconcile_disk() {
-            Refresh::Failed => {
-                return Err(std::io::Error::other(
-                    "could not reread the file, leaving it untouched",
-                ));
+        for _ in 0..4 {
+            let refresh = self.reconcile_disk();
+            match refresh {
+                Refresh::Failed => {
+                    return Err(std::io::Error::other(
+                        "could not reread the file, leaving it untouched",
+                    ));
+                }
+                Refresh::Gone if !explicit => return Ok(()),
+                Refresh::Missing if !explicit => {
+                    return Err(std::io::Error::other("file was deleted; not recreating it"));
+                }
+                // A conflict already in the buffer stays conflicted when the file
+                // has not moved again. `reconcile_disk` reports that as unchanged,
+                // and it still must not be written over the other copy.
+                Refresh::Conflict if !explicit => {
+                    return Err(std::io::Error::other(
+                        "refusing to overwrite a file that conflicts with a newer copy",
+                    ));
+                }
+                _ if !explicit && (self.conflicted || self.saw_conflict) => {
+                    return Err(std::io::Error::other(
+                        "refusing to overwrite a file that conflicts with a newer copy",
+                    ));
+                }
+                _ => {}
             }
-            // A conflict already in the buffer stays conflicted when the file
-            // has not moved again. `reconcile_disk` reports that as unchanged,
-            // and it still must not be written over the other copy.
-            Refresh::Conflict if !explicit => {
-                return Err(std::io::Error::other(
-                    "refusing to overwrite a file that conflicts with a newer copy",
-                ));
+            if !self.dirty && !explicit {
+                return Ok(());
             }
-            _ if !explicit && (self.conflicted || self.saw_conflict) => {
-                return Err(std::io::Error::other(
-                    "refusing to overwrite a file that conflicts with a newer copy",
-                ));
+            let result = if matches!(refresh, Refresh::Missing | Refresh::Gone) {
+                self.write_absent()
+            } else {
+                self.write_if_matches()
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if crate::state::is_file_changed(&error) => continue,
+                Err(error) => return Err(error),
             }
-            _ => {}
         }
-        if !self.dirty && !explicit {
+        Err(crate::state::file_changed())
+    }
+
+    fn write_if_matches(&mut self) -> Result<(), std::io::Error> {
+        let Some(path) = self.store_path().map(|path| path.to_path_buf()) else {
             return Ok(());
-        }
-        self.write_buffer()?;
-        if explicit {
-            self.conflicted = false;
-            self.saw_conflict = false;
-        }
+        };
+        let text = self.text();
+        crate::state::atomic_write_if_matches(&path, text.as_bytes(), self.synced.as_bytes())?;
+        self.note_saved();
+        Ok(())
+    }
+
+    fn write_absent(&mut self) -> Result<(), std::io::Error> {
+        let Some(path) = self.store_path().map(|path| path.to_path_buf()) else {
+            return Ok(());
+        };
+        crate::state::atomic_write_if_absent(&path, self.text().as_bytes())?;
+        self.note_saved();
         Ok(())
     }
 
@@ -705,16 +774,8 @@ impl Tab {
         self.dirty = false;
         self.conflicted = false;
         self.saw_conflict = false;
+        self.on_disk = true;
         self.synced = self.text();
-    }
-
-    pub fn write_buffer(&mut self) -> Result<(), std::io::Error> {
-        let Some(path) = self.store_path().map(|path| path.to_path_buf()) else {
-            return Ok(());
-        };
-        self.write_to(&path)?;
-        self.note_saved();
-        Ok(())
     }
 
     /// Write the buffer to `path` without changing where this tab is stored.
@@ -775,7 +836,7 @@ mod tests {
         });
         assert!(tab.unreadable);
         tab.dirty = true;
-        assert!(tab.write_buffer().is_err());
+        assert!(tab.write_to(&file).is_err());
         assert!(file.is_dir());
     }
 
@@ -795,8 +856,22 @@ mod tests {
         });
         assert!(!tab.unreadable);
         tab.content = text_editor::Content::with_text("hello");
-        tab.write_buffer().unwrap();
+        tab.write_to(&file).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+    }
+
+    #[test]
+    fn breaking_a_line_does_not_park_the_caret_at_the_top() {
+        let mut tab = Tab::testing("one\ntwo\nthree");
+        tab.content.move_to(text_editor::Cursor {
+            position: text_editor::Position { line: 2, column: 5 },
+            selection: None,
+        });
+        tab.break_line(None);
+        let view = tab.viewport(4);
+        assert_eq!(view.top_line, 0);
+        assert!(view.lead.abs() < 0.01);
+        assert_eq!(view.slots[0].number, Some(1));
     }
 
     #[test]
@@ -899,6 +974,7 @@ mod tests {
                 0,
                 0,
                 false,
+                false,
             );
             assert_eq!(tab.text(), sample, "{sample:?}");
             assert_eq!(tab.synced, sample);
@@ -966,6 +1042,81 @@ mod tests {
         tab.flush(true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), marked);
         assert!(!tab.conflicted());
+    }
+
+    #[test]
+    fn a_shortened_conflict_marker_does_not_clear_the_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut tab) = file_tab(dir.path(), "note.txt", "a\n");
+        tab.content = text_editor::Content::with_text("local\n");
+        tab.dirty = true;
+        fs::write(&path, "remote\n").unwrap();
+        assert_eq!(tab.reconcile_disk(), Refresh::Conflict);
+        let marked = tab.text();
+        let damaged = marked.replacen("<<<<<<< subtext (this computer)", "<<<<", 1);
+        tab.content = text_editor::Content::with_text(&damaged);
+        tab.refresh_conflict_flag(true);
+        assert!(tab.conflicted());
+        tab.dirty = true;
+        assert!(tab.flush(false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "remote\n");
+
+        let without_opener = damaged
+            .lines()
+            .filter(|line| !line.starts_with("<<<<"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tab.content = text_editor::Content::with_text(&without_opener);
+        tab.refresh_conflict_flag(true);
+        assert!(tab.conflicted(), "{without_opener}");
+        assert!(tab.flush(false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "remote\n");
+    }
+
+    #[test]
+    fn deleting_a_file_with_unsaved_text_does_not_recreate_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut tab) = file_tab(dir.path(), "note.txt", "hello\n");
+        tab.content = text_editor::Content::with_text("hello\nlocal\n");
+        tab.dirty = true;
+        fs::remove_file(&path).unwrap();
+        assert_eq!(tab.reconcile_disk(), Refresh::Missing);
+        assert_eq!(tab.text(), "hello\nlocal\n");
+        assert!(tab.flush(false).is_err());
+        assert!(!path.exists());
+        tab.flush(true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\nlocal\n");
+    }
+
+    #[test]
+    fn a_clean_deleted_file_stays_deleted_until_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut tab) = file_tab(dir.path(), "note.txt", "hello\n");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(tab.reconcile_disk(), Refresh::Gone);
+        tab.flush(false).unwrap();
+        assert!(!path.exists());
+        assert_eq!(tab.text(), "hello\n");
+    }
+
+    #[test]
+    fn a_new_scratch_is_created_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch_1.txt");
+        let mut tab = Tab::from_record(Record {
+            id: "scratch".into(),
+            title: "Scratch 1".into(),
+            file_path: None,
+            scratch_path: Some(path.clone()),
+            language: Language::Plain,
+            cursor_line: 0,
+            cursor_column: 0,
+            scroll_lines: 0,
+        });
+        tab.content = text_editor::Content::with_text("first\n");
+        tab.dirty = true;
+        tab.flush(false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first\n");
     }
 
     #[test]

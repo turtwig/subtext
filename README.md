@@ -78,7 +78,11 @@ the other copy's lines
 >>>>>>> subtext (other copy)
 ```
 
-Delete the markers and keep the lines you want. The next hide then saves. Ctrl+S writes the buffer as it stands, markers included, and that becomes the new baseline. Hiding, closing the tab, or any other automatic save will not overwrite a conflict, and will not delete a scratch whose file changed on disk. Undoing back to this computer's text does not count as resolving it. A failed reread leaves both the buffer and the file alone.
+Delete every marker line and keep the text you want. A marker line is one that still starts with `<<<<` or `>>>>`, or a line made only of `=` signs. Shortening or deleting just the first line does not resolve it. The next hide then saves. Ctrl+S writes the buffer as it stands, markers included, and that becomes the new baseline. Hiding, closing the tab, or any other automatic save will not overwrite a conflict, and will not delete a scratch whose file changed on disk. Undoing back to this computer's text does not count as resolving it. A failed reread leaves both the buffer and the file alone.
+
+If the file is deleted while this buffer has unsaved text, Subtext keeps the buffer and does not recreate the file. Ctrl+S writes it again. A scratch that has never been saved is still created on the next save.
+
+A save locks the file and replaces it only when it still contains the bytes just read. If the other computer saved first, this one reads that copy and merges instead of writing over it. Two saves that pass the lock do not share a temporary file.
 
 The same rules apply when a file is edited in another program while it is open here. Both computers need this version. A drawer that is already open picks the other copy up the next time it opens, and before it saves.
 

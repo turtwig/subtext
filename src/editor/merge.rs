@@ -14,9 +14,13 @@ const DIVIDER: &str = "=======\n";
 const THEIRS: &str = ">>>>>>> subtext (other copy)\n";
 
 /// Give up the line diff past this many changed lines and mark the whole file.
-/// The trace is small for a notes buffer and would grow with the square of a
-/// rewrite, which a scratch pad does not need to spend memory on.
+/// Each step keeps only its own diagonals, so the trace stays near the square
+/// of this distance instead of the size of the file.
 const MAX_DISTANCE: usize = 1000;
+
+/// A side larger than this is not diffed. The buffer is marked instead.
+const MAX_TEXT: usize = 1024 * 1024;
+const MAX_LINES: usize = 20_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Merge {
@@ -25,12 +29,42 @@ pub enum Merge {
 }
 
 /// `base` is the shared ancestor, `local` is this buffer, `remote` is the file.
+/// A line that still looks like one of our conflict markers.
+///
+/// The opener and closer can lose characters and still count. The divider
+/// counts while it is a line of `=` signs. Ordinary notes are not checked
+/// unless a conflict is already open.
+pub fn has_conflict_marker(text: &str) -> bool {
+    text.lines().any(line_is_marker)
+}
+
+fn line_is_marker(line: &str) -> bool {
+    let line = line.trim();
+    if line.contains(OURS_MARK) {
+        return true;
+    }
+    let bytes = line.as_bytes();
+    if bytes.len() >= 4 && bytes.iter().all(|byte| *byte == b'=') {
+        return true;
+    }
+    let chevrons = bytes
+        .iter()
+        .take_while(|byte| **byte == b'<' || **byte == b'>')
+        .count();
+    chevrons >= 4
+        && (bytes[..chevrons].iter().all(|byte| *byte == b'<')
+            || bytes[..chevrons].iter().all(|byte| *byte == b'>'))
+}
+
 pub fn merge(base: &str, local: &str, remote: &str) -> Merge {
     if local == remote || remote == base {
         return Merge::Clean(local.to_string());
     }
     if local == base {
         return Merge::Clean(remote.to_string());
+    }
+    if over_budget(base) || over_budget(local) || over_budget(remote) {
+        return Merge::Conflict(too_large());
     }
     let base_lines = split_lines(base);
     let local_lines = split_lines(local);
@@ -42,6 +76,32 @@ pub fn merge(base: &str, local: &str, remote: &str) -> Merge {
         return Merge::Conflict(marked(local, remote));
     };
     apply(&base_lines, &local_hunks, &remote_hunks)
+}
+
+fn over_budget(text: &str) -> bool {
+    text.len() > MAX_TEXT || line_count(text) > MAX_LINES
+}
+
+fn line_count(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let breaks = text.bytes().filter(|byte| *byte == b'\n').count();
+    if text.ends_with('\n') {
+        breaks
+    } else {
+        breaks + 1
+    }
+}
+
+fn too_large() -> String {
+    let mut out = String::new();
+    out.push_str(OURS);
+    out.push_str("This note is too large to merge with the other copy.\n");
+    out.push_str(DIVIDER);
+    out.push_str("The other copy was left unchanged.\n");
+    out.push_str(THEIRS);
+    out
 }
 
 fn marked(local: &str, remote: &str) -> String {
@@ -124,64 +184,88 @@ fn hunks(base: &[String], other: &[String]) -> Option<Vec<Hunk>> {
     Some(hunks)
 }
 
+/// One Myers frontier. `xs[k + span]` is the x reached on diagonal `k`.
+struct Snap {
+    span: i32,
+    xs: Vec<i32>,
+}
+
+fn snap_get(snap: &Snap, diagonal: i32) -> i32 {
+    let index = diagonal + snap.span;
+    if index < 0 {
+        return 0;
+    }
+    snap.xs.get(index as usize).copied().unwrap_or(0)
+}
+
 /// Myers edit script. `None` when the two sides rewrote too much to trace.
 fn diff(a: &[String], b: &[String]) -> Option<Vec<Op>> {
-    let n = a.len();
-    let m = b.len();
+    if a.len() > MAX_LINES || b.len() > MAX_LINES {
+        return None;
+    }
+    let n = a.len() as i32;
+    let m = b.len() as i32;
     let max = n + m;
     if max == 0 {
         return Some(Vec::new());
     }
-    let offset = max as i32;
-    let mut frontier = vec![0i32; 2 * max + 1];
     let mut trace = Vec::new();
+    let mut current = Snap {
+        span: 0,
+        xs: vec![0],
+    };
     for distance in 0..=max {
-        if distance > MAX_DISTANCE {
+        if distance as usize > MAX_DISTANCE {
             return None;
         }
-        trace.push(frontier.clone());
-        let distance_i = distance as i32;
-        for diagonal in (-distance_i..=distance_i).step_by(2) {
-            let mut x = if diagonal == -distance_i
-                || (diagonal != distance_i
-                    && frontier[(offset + diagonal - 1) as usize]
-                        < frontier[(offset + diagonal + 1) as usize])
+        trace.push(Snap {
+            span: current.span,
+            xs: current.xs.clone(),
+        });
+        let mut next = vec![0i32; (2 * distance + 1) as usize];
+        for diagonal in (-distance..=distance).step_by(2) {
+            let mut x = if diagonal == -distance
+                || (diagonal != distance
+                    && snap_get(&current, diagonal - 1) < snap_get(&current, diagonal + 1))
             {
-                frontier[(offset + diagonal + 1) as usize]
+                snap_get(&current, diagonal + 1)
             } else {
-                frontier[(offset + diagonal - 1) as usize] + 1
+                snap_get(&current, diagonal - 1) + 1
             };
             let mut y = x - diagonal;
-            while x < n as i32 && y < m as i32 && a[x as usize] == b[y as usize] {
+            while x < n && y < m && a[x as usize] == b[y as usize] {
                 x += 1;
                 y += 1;
             }
-            frontier[(offset + diagonal) as usize] = x;
-            if x >= n as i32 && y >= m as i32 {
-                return Some(backtrack(&trace, offset, n, m));
+            next[(diagonal + distance) as usize] = x;
+            if x >= n && y >= m {
+                return Some(backtrack(&trace, n, m));
             }
         }
+        current = Snap {
+            span: distance,
+            xs: next,
+        };
     }
     None
 }
 
-fn backtrack(trace: &[Vec<i32>], offset: i32, n: usize, m: usize) -> Vec<Op> {
+fn backtrack(trace: &[Snap], n: i32, m: i32) -> Vec<Op> {
     let mut ops = Vec::new();
-    let mut x = n as i32;
-    let mut y = m as i32;
+    let mut x = n;
+    let mut y = m;
     for (distance, frontier) in trace.iter().enumerate().rev() {
         let distance_i = distance as i32;
         let diagonal = x - y;
         let prev_diagonal = if diagonal == -distance_i
             || (diagonal != distance_i
-                && frontier[(offset + diagonal - 1) as usize]
-                    < frontier[(offset + diagonal + 1) as usize])
+                && snap_get(frontier, diagonal - 1) < snap_get(frontier, diagonal + 1))
         {
             diagonal + 1
         } else {
             diagonal - 1
         };
-        let prev_x = frontier[(offset + prev_diagonal) as usize];
+        let prev_x = snap_get(frontier, prev_diagonal);
         let prev_y = prev_x - prev_diagonal;
         while x > prev_x && y > prev_y {
             x -= 1;
@@ -529,5 +613,34 @@ mod tests {
             merge("a\n", "a\nb\n", "a\nc\n"),
             Merge::Conflict(_)
         ));
+    }
+
+    #[test]
+    fn a_damaged_marker_line_still_counts() {
+        assert!(has_conflict_marker(
+            "<<<<<<< subtext (this computer)\nours\n=======\ntheirs\n>>>>>>> subtext (other copy)\n"
+        ));
+        assert!(has_conflict_marker("<<<<<<< edited label\n"));
+        assert!(has_conflict_marker("<<<<\n"));
+        assert!(has_conflict_marker("=======\n"));
+        assert!(has_conflict_marker("====\n"));
+        assert!(has_conflict_marker(">>>>>>> renamed\n"));
+        assert!(!has_conflict_marker("hello\n===\n"));
+        assert!(!has_conflict_marker(
+            "a line about <<<<<<< inside a sentence\n"
+        ));
+    }
+
+    #[test]
+    fn a_file_past_the_line_budget_is_a_conflict_without_copying_it() {
+        let local = "L\n".repeat(MAX_LINES + 1);
+        let remote = "R\n".repeat(MAX_LINES + 1);
+        match merge("a\n", &local, &remote) {
+            Merge::Conflict(text) => {
+                assert!(text.contains("too large"));
+                assert!(!text.contains(&local));
+            }
+            Merge::Clean(text) => panic!("merged an oversized file into {text}"),
+        }
     }
 }

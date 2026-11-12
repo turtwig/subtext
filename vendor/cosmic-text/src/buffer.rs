@@ -476,6 +476,17 @@ impl Buffer {
             if total_height < scroll_end && self.scroll.line > 0 {
                 // Need to scroll up to stay inside of buffer
                 self.scroll.vertical -= scroll_end - total_height;
+            } else if total_height < scroll_end {
+                // The lines from here do not fill the box. A leftover
+                // vertical offset, smaller than one line, still hides the
+                // first line when the note is shorter than the drawer.
+                let height = self.height_opt.unwrap_or(f32::INFINITY);
+                let max_vertical = (total_height - height).max(0.0);
+                if self.scroll.vertical > max_vertical {
+                    self.scroll.vertical = max_vertical;
+                } else {
+                    break;
+                }
             } else {
                 // Done adjusting scroll
                 break;
