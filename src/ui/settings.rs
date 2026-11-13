@@ -187,7 +187,7 @@ pub fn view(model: Model) -> Element<'static, Message> {
                 kind,
             ),
             labeled("Screen edge", edges, kind),
-            explained(
+            labeled(
                 "Border",
                 row![
                     text_button("A−", Message::BorderSmaller, kind),
@@ -199,7 +199,6 @@ pub fn view(model: Model) -> Element<'static, Message> {
                 ]
                 .spacing(8)
                 .align_y(alignment::Vertical::Center),
-                "Drag still works at 0.",
                 kind,
             ),
             labeled(

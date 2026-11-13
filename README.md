@@ -25,7 +25,7 @@ exec subtext
 bindsym $mod+grave exec subtext toggle
 ```
 
-On KDE, bind `subtext toggle` to a global shortcut. Background blur uses the KWin blur protocol and does nothing on other compositors.
+On KDE, bind `subtext toggle` to a global shortcut. Background blur uses `ext_background_effect_v1` when the compositor advertises it, and the older KWin blur protocol otherwise. It does nothing when neither is available.
 
 ## Editing
 

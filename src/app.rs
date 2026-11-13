@@ -1962,8 +1962,9 @@ impl App {
     /// Keep the frost on the part of the plate that is still on the output.
     /// Once that part is gone, drop the region. Leaving the previous rectangle
     /// up shows frost the drawer no longer covers.
-    /// Publish the plate rectangle again. Chrome changes do not move it, and
-    /// KWin will not notice a new buffer until the blur object is replaced.
+    /// Publish the plate rectangle again. Chrome changes do not move it. The
+    /// old KWin protocol keeps its frost until the blur object is replaced.
+    /// `ext_background_effect_v1` applies the resent region on the next commit.
     fn refrost(&self) {
         self.sync_blur();
         crate::blur::refresh_drawer();
