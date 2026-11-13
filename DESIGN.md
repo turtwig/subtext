@@ -14,7 +14,7 @@ The daemon opens the layer surface immediately and leaves it parked off the anch
 
 The drawer is one layer-shell surface anchored to all four edges with a requested size of 0×0, so it covers the output. The plate is a widget inside that surface. Its input region is the on-screen part of the plate. A parked drawer adds nothing to the region, which makes the rest of the output click-through. An empty region is click-through. A null region would be the whole output.
 
-While the drawer is open its layer is `Overlay`, except while Settings is open, when the drawer drops to `Top` so the settings surface can sit above it. Both drop to `Bottom` while a file dialog is open, because an ordinary xdg dialog cannot cover `Top` or `Overlay`. Keyboard interactivity is exclusive while the drawer is open, on-demand while Settings is open, and none while a dialog is open or the drawer is parked.
+While the drawer is open its layer is `Top`, the same band a quake-style terminal uses. Overlay clients such as Spectacle then draw above it, and the drawer still covers ordinary windows. Settings is its own overlay surface, so it stays above the drawer. Both drop to `Bottom` while a file dialog is open, because an ordinary xdg dialog cannot cover `Top` or `Overlay`. Keyboard interactivity is exclusive while the drawer is open, on-demand while Settings is open, and none while a dialog is open or the drawer is parked.
 
 Settings is a second layer surface, centered, namespace `subtext-settings`, on the overlay layer. It is not a page inside the drawer. Closing it returns focus to the editor. Escape closes Settings first, then a scratch-close prompt, then the find bar, and then hides the drawer.
 

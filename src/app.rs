@@ -1165,7 +1165,7 @@ impl App {
         } else if self.settings_window.is_some() {
             (Layer::Top, KeyboardInteractivity::OnDemand)
         } else {
-            (Layer::Overlay, KeyboardInteractivity::Exclusive)
+            (Layer::Top, KeyboardInteractivity::Exclusive)
         };
         let mut tasks = vec![self.drawer_layer(layer), self.keyboard(keyboard)];
         if let Some(id) = self.settings_window {
@@ -1287,8 +1287,8 @@ impl App {
         self.refresh_screens();
         let (id, open) = crate::message::open_settings(self.output_option());
         self.settings_window = Some(id);
-        // Settings is an overlay surface. `Top` keeps the drawer above ordinary
-        // windows and below that overlay, so theme changes stay visible.
+        // Settings is an overlay surface, above this `Top` drawer, so theme
+        // changes stay visible. The layer request is a no-op while already open.
         Task::batch([
             open,
             self.drawer_layer(Layer::Top),
@@ -1296,7 +1296,7 @@ impl App {
         ])
     }
 
-    /// Return the drawer to the top and put the caret back in the editor.
+    /// Put the caret back in the editor.
     ///
     /// While settings is open the drawer accepts focus on demand. KWin only
     /// activates a layer surface when that flag changes, so a direct switch
@@ -1305,7 +1305,7 @@ impl App {
     fn restore_after_settings(&mut self) -> Task<Message> {
         if !self.wants_open() {
             return Task::batch([
-                self.drawer_layer(Layer::Overlay),
+                self.drawer_layer(Layer::Top),
                 self.keyboard(KeyboardInteractivity::None),
                 self.hit_region(),
             ]);
@@ -1316,7 +1316,7 @@ impl App {
                 self.keyboard(KeyboardInteractivity::None),
             ]);
         }
-        let layer = self.drawer_layer(Layer::Overlay);
+        let layer = self.drawer_layer(Layer::Top);
         let release = self.keyboard(KeyboardInteractivity::None);
         let grab = self.keyboard(KeyboardInteractivity::Exclusive);
         let focus = self.focus_editor();
@@ -1778,12 +1778,13 @@ impl App {
 
     fn layer_settings(&self) -> NewLayerShellSettings {
         let (anchor, size, margin) = self.shell_layout();
+        // `Top` stays under overlay clients such as Spectacle. Settings is the
+        // surface that uses `Overlay`. A file dialog is an ordinary window, so
+        // both surfaces drop to `Bottom` while one is open.
         let layer = if self.dialog_open {
             Layer::Bottom
-        } else if self.settings_window.is_some() {
-            Layer::Top
         } else {
-            Layer::Overlay
+            Layer::Top
         };
         NewLayerShellSettings {
             size: Some(size),
@@ -2176,7 +2177,7 @@ pub fn settings(connection: Option<iced_layershell::reexport::WithConnection>) -
         default_text_size: iced::Pixels(geom::TEXT_SIZE),
         layer_settings: LayerShellSettings {
             anchor: Anchor::Bottom,
-            layer: Layer::Overlay,
+            layer: Layer::Top,
             exclusive_zone: 0,
             size: None,
             margin: (0, 0, 0, 0),
